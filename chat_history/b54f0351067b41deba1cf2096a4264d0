@@ -1,0 +1,1 @@
+[{"type": "human", "data": {"content": "你好", "additional_kwargs": {}, "response_metadata": {}, "type": "human", "name": null, "id": null}}, {"type": "ai", "data": {"content": "你好！有什么可以帮您的吗？", "additional_kwargs": {}, "response_metadata": {}, "type": "ai", "name": null, "id": null, "tool_calls": [], "invalid_tool_calls": [], "usage_metadata": null}}]
