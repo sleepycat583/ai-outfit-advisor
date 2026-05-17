@@ -1,65 +1,156 @@
-👗 AI 智能穿搭顾问 (AI Outfit Advisor)
+# 👗 AI 智能穿搭顾问 · 小衣 (AI Outfit Advisor)
 
-这是一个专为大学生群体打造的个性化智能穿搭推荐助手。基于大语言模型与 RAG（检索增强生成）技术，能够根据用户的性别、偏好风格、体型特征，结合本地穿搭知识库，提供针对“早八”、“面试”、“约会”等不同场景的穿搭建议。
+> **V1.2** — 基于 LangChain Agent + RAG 双引擎的个性化穿搭推荐系统
 
-💡 核心亮点
+一个面向大学生群体的智能穿搭决策助手。融合**大语言模型 (Qwen3-max)**、**RAG 本地知识库 (Chroma)** 与 **Agent 联网搜索 (DuckDuckGo)**，以"顶尖私人穿搭主理人"人设，为不同性别、风格、体型的用户提供面试、约会、早八等高频场景的 OOTD 解决方案。
 
-千人千面: 结合用户特征（性别/体型/风格）进行个性化推荐。
+---
 
-场景驱动: 覆盖大学生高频场景（面试、早八、约会、运动）。
+## ✨ 核心亮点
 
-知识库增强 (RAG): 融合专业洗护、尺码指南，拒绝 AI 胡说八道。
+| 引擎 | 能力 |
+|------|------|
+| 🧠 **Agent 联网决策** | 自主调用 DuckDuckGo 实时搜索天气、流行趋势，结合 LangChain 全生命周期 Callback 系统实现终端透明日志 |
+| 📚 **RAG 本地知识库** | 基于 Chroma 向量数据库，覆盖洗护养护、尺码推荐、颜色搭配三大领域，支持 `.txt` 文档一键上传与 MD5 去重 |
+| 🎯 **千人千面画像** | 侧边栏"穿搭档案"支持性别、偏好风格、身高体重动态注入 System Prompt，实现真正的个性化生成 |
+| 💬 **专业人设** | "小衣"以时尚主理人口吻输出：场景破冰 → OOTD 推荐 → 私藏贴士 → 专属签名，排版清晰有呼吸感 |
 
-🛠️ 技术栈
+---
 
-前端交互: Streamlit
+## 🏗️ 系统架构
 
-AI 核心框架: LangChain
+```
+┌─────────────────────────────────────────────────┐
+│                  Streamlit UI                     │
+│  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
+│  │ 侧边栏    │  │ 快捷提问 │  │ 打字机流式输出 │  │
+│  │ 穿搭档案  │  │ 一键发送 │  │ typewriter    │  │
+│  └──────────┘  └──────────┘  └───────────────┘  │
+├─────────────────────────────────────────────────┤
+│              LangChain Pipeline                   │
+│  ┌─────────────────────────────────────────────┐ │
+│  │  RunnableWithMessageHistory                  │ │
+│  │  ┌───────────────────────────────────────┐  │ │
+│  │  │  AgentExecutor                         │  │ │
+│  │  │  ┌─────────────┐  ┌────────────────┐  │  │ │
+│  │  │  │ DuckDuckGo  │  │ Retriever Tool │  │  │ │
+│  │  │  │ (联网搜索)   │  │ (知识库检索)   │  │  │ │
+│  │  │  └─────────────┘  └────────────────┘  │  │ │
+│  │  └───────────────────────────────────────┘  │ │
+│  │  → RunnableLambda (output extraction)       │ │
+│  └─────────────────────────────────────────────┘ │
+├─────────────────────────────────────────────────┤
+│               Data Layer                          │
+│  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
+│  │ Chroma   │  │ File     │  │ DashScope API │  │
+│  │ 向量库   │  │ Chat     │  │ Qwen3-max     │  │
+│  │          │  │ History  │  │ text-embed-v4 │  │
+│  └──────────┘  └──────────┘  └───────────────┘  │
+└─────────────────────────────────────────────────┘
+```
 
-向量数据库: Chroma
+---
 
-大模型服务: 阿里云 DashScope (Qwen3-max 对话 + Text-Embedding-v4)
+## 🛠️ 技术栈
 
-🚀 版本记录 (Changelog)
+| 层级 | 技术选型 |
+|------|----------|
+| 前端交互 | Streamlit |
+| AI 编排 | LangChain (Core + Community + Classic Agents) |
+| 大语言模型 | 阿里云 DashScope — Qwen3-max |
+| 向量嵌入 | DashScope — text-embedding-v4 |
+| 向量数据库 | Chroma (本地持久化) |
+| 联网搜索 | DuckDuckGo Search (Agent Tool) |
+| 会话管理 | File-based Chat History (JSON 持久化) |
+| 文本分割 | LangChain RecursiveCharacterTextSplitter |
 
-v1.0.0 (当前版本) - 基础框架与体验升级
+---
 
-✨ 新特性 (Features):
+## 📦 快速开始
 
-统一化可视化交互 (UI重构): 废弃原始割裂的双文件模式，将“知识库上传后台”与“智能问答前台”整合为单一 Web 页面 (app.py)。
+### 环境要求
 
-用户画像控制面板: 侧边栏新增“我的穿搭档案”，支持用户自主设置性别、偏好风格、身高体重信息。
+- Python 3.10+
+- 阿里云 DashScope API Key
 
-动态会话隔离: 引入 UUID 机制，彻底解决多用户/多窗口共用 Session 导致的聊天记录冲突问题。
+### 安装
 
-隐式调试模式: 优化界面，将 Session ID 等技术信息折叠隐藏，提升产品可用性与美观度。
-
-文档极速学习: 支持 .txt 格式知识库的本地解析、切分与向量化存储，具备基于 MD5 的防重复上传机制。
-
-🚧 待办事项 (To-Do):
-
-[ ] 将侧边栏的“用户档案”数据动态注入 RAG 的 System Prompt 中，实现真正的个性化问答。
-
-[ ] 接入 Web Search 工具 (Agent)，使 AI 能够感知实时天气和网络流行趋势。
-
-[ ] 在主界面增加高频问题的“一键发送”按钮。
-
-📦 如何运行本项目
-
-克隆仓库
-
-git clone [https://github.com/你的用户名/ai-outfit-advisor.git](https://github.com/你的用户名/ai-outfit-advisor.git)
+```bash
+git clone https://github.com/sleepycat583/ai-outfit-advisor.git
 cd ai-outfit-advisor
-
-
-安装依赖
-
 pip install -r requirements.txt
+```
 
+### 配置
 
-配置环境
-(说明：当前版本的大模型 API 调用可能需要在代码中配置，后续将优化为读取 .env 文件)
+在代码或环境变量中配置 DashScope API Key：
 
-启动应用
+```bash
+export DASHSCOPE_API_KEY="your-api-key"
+```
 
-streamlit run app.py
+> 如遇本地代理拦截 DashScope 请求（ProxyError），代码已在入口处设置 `NO_PROXY=dashscope.aliyuncs.com` 白名单绕过。
+
+### 启动
+
+```bash
+# 主应用 — AI 穿搭顾问问答
+streamlit run app_qa.py
+
+# 知识库管理 — 上传 .txt 素材
+streamlit run app_file_uploader.py
+```
+
+---
+
+## 📂 项目结构
+
+```
+ai-outfit-advisor/
+├── app_qa.py                   # 主入口：AI 穿搭问答（Streamlit UI）
+├── app_file_uploader.py        # 知识库管理：.txt 文档上传与向量化
+├── rag.py                      # RAG 核心：Agent + Prompt + 链构建
+├── history.py                  # 会话历史：文件持久化读写
+├── vector_store_service.py     # 向量检索服务封装
+├── knowledge_base.py           # 知识库引擎：Chroma + MD5 去重
+├── config_data.py              # 集中配置：模型、切分参数、路径
+├── requirements.txt            # Python 依赖清单
+├── chat_history/               # 用户会话历史（JSON）
+├── data/chroma/                # Chroma 向量库持久化目录
+├── 洗涤养护.txt                # 知识库素材
+├── 尺码推荐.txt
+├── 颜色选择.txt
+├── 2026春夏色彩搭配与流行趋势.txt
+├── 体型扬长避短穿搭法则.txt
+└── 大厂面试穿搭指南.txt
+```
+
+---
+
+## 📝 Changelog
+
+### V1.2 (当前版本)
+
+- **全新 Prompt 人设** — "小衣"升级为顶尖私人穿搭主理人，三板块排版美学（场景感知 / OOTD 灵感 / 私藏贴士）+ 专属签名
+- **Agent 联网搜索** — 集成 DuckDuckGo Tool，AI 可自主决定联网获取实时天气与流行趋势
+- **Callback 架构升级** — `ConsoleLoggingHandler` 从 AgentExecutor 内部迁移至 `chain.stream` 根节点 config 注入，确保终端日志稳定输出
+- **DashScope 代理绕过** — 入口处设置 `NO_PROXY` 环境变量，解决本地代理导致的连接失败
+- **快捷提问按钮** — 主界面新增面试、洗护、尺码三个一键发送场景
+- **流式打字机效果** — 回答逐字渲染，提升交互体验
+
+### V1.0
+
+- 基于 LangChain + Chroma + DashScope 的 RAG 问答框架
+- Streamlit 统一交互界面，侧边栏用户画像
+- UUID 会话隔离，FileChatMessageHistory 持久化
+- 知识库 .txt 上传、文本分割、向量化存储与 MD5 去重
+
+---
+
+## 👤 作者
+
+**sleepycat583** · [GitHub](https://github.com/sleepycat583)
+
+---
+
+*Made with LangChain + Streamlit + ❤️*
