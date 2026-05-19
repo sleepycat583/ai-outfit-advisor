@@ -7,6 +7,10 @@ import config_data as config
 from recommendation_rules import build_constraints
 from telemetry import append_jsonl, now_iso
 
+REQUEST_WINDOW_SECONDS = int(config.request_window_seconds)
+MAX_REQUESTS_PER_WINDOW = int(config.max_requests_per_window)
+MAX_FAILURE_REASON_LENGTH = int(config.max_failure_reason_length)
+
 # 强制指定阿里云 DashScope 接口不走本地代理，解决 ProxyError
 os.environ["NO_PROXY"] = "dashscope.aliyuncs.com"
 
@@ -39,9 +43,10 @@ def fallback_response(scene: str, style: str, budget: str, body: str) -> str:
 def is_rate_limited() -> bool:
     now = time.time()
     timestamps = st.session_state.setdefault("request_timestamps", [])
-    window = int(config.request_window_seconds)
-    st.session_state["request_timestamps"] = [t for t in timestamps if now - t <= window]
-    if len(st.session_state["request_timestamps"]) >= int(config.max_requests_per_window):
+    st.session_state["request_timestamps"] = [
+        t for t in timestamps if now - t <= REQUEST_WINDOW_SECONDS
+    ]
+    if len(st.session_state["request_timestamps"]) >= MAX_REQUESTS_PER_WINDOW:
         return True
     else:
         st.session_state["request_timestamps"].append(now)
@@ -171,7 +176,7 @@ if final_prompt:
             "scene": constraints.scene,
             "style": constraints.style,
             "budget": constraints.budget,
-            "failure_reason": failure_reason[: int(config.max_failure_reason_length)],
+            "failure_reason": failure_reason[:MAX_FAILURE_REASON_LENGTH],
         },
     )
 
