@@ -19,7 +19,7 @@
 
 ## 🚀 最新优化与亮点
 
-- **模块化检索层**：抽离 `vector_store_service.py` 统一封装 Chroma 初始化与 Retriever 构建，`rag.py` 聚焦 Agent 逻辑。
+- **模块化检索层**：提取 `vector_store_service.py` 统一封装 Chroma 初始化与 Retriever 构建，`rag.py` 聚焦 Agent 逻辑。
 - **配置分层与自动加载**：`config_data.py` 集中管理模型名、切分参数、向量库路径等，同时支持 `.env` 自动读取。
 - **RAG 检索链路强化**：Retriever Tool 直连知识库，检索返回数量通过 `similarity_threshold` 控制。
 - **会话可靠性提升**：文件型历史记录引入锁与原子写入，避免并发写入导致的损坏。
