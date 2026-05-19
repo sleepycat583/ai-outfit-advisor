@@ -96,7 +96,7 @@ NO_PROXY=dashscope.aliyuncs.com
 
 ```bash
 export DASHSCOPE_API_KEY="your-api-key"
-export NO_PROXY="dashscope.aliyuncs.com"   # 可选
+export NO_PROXY="dashscope.aliyuncs.com"   # 可选：本地代理环境下使用
 ```
 
 ### 启动服务
