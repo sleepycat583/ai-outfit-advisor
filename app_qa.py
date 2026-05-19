@@ -51,6 +51,19 @@ def is_rate_limited() -> bool:
         return True
     return False
 
+
+def submit_user_signal(kind: str, path: str, response_text: str, success_text: str) -> None:
+    append_jsonl(
+        path,
+        {
+            "ts": now_iso(),
+            "session_id": st.session_state["session_id"],
+            "kind": kind,
+            "response": response_text,
+        },
+    )
+    st.success(success_text)
+
 st.set_page_config(page_title="RAG Question Answering", layout="wide")
 
 st.title("🤖 RAG Question Answering System")
@@ -157,7 +170,7 @@ if final_prompt:
                 res = st.write_stream(typewriter_stream(stream))
             except Exception as e:
                 success = False
-                safe_detail = str(e).replace("\n", " ").replace("\r", " ")[:120]
+                safe_detail = str(e).replace("\n", " ").replace("\r", " ")[:MAX_FAILURE_REASON_LENGTH]
                 failure_reason = f"{type(e).__name__}: {safe_detail}"
                 res = fallback_response(user_scene, user_style, user_budget, user_body)
                 st.write(res)
@@ -185,34 +198,23 @@ if st.session_state.get("last_assistant_response"):
     st.caption("这条建议对你有帮助吗？可收藏或反馈，帮助我持续优化。")
     col_like, col_dislike, col_fav = st.columns(3)
     if col_like.button("👍 有帮助", use_container_width=True):
-        append_jsonl(
+        submit_user_signal(
+            "positive_feedback",
             config.feedback_path,
-            {
-                "ts": now_iso(),
-                "session_id": st.session_state["session_id"],
-                "feedback": "positive",
-                "response": st.session_state["last_assistant_response"],
-            },
+            st.session_state["last_assistant_response"],
+            "收到你的正向反馈啦！",
         )
-        st.success("收到你的正向反馈啦！")
     if col_dislike.button("👎 需改进", use_container_width=True):
-        append_jsonl(
+        submit_user_signal(
+            "negative_feedback",
             config.feedback_path,
-            {
-                "ts": now_iso(),
-                "session_id": st.session_state["session_id"],
-                "feedback": "negative",
-                "response": st.session_state["last_assistant_response"],
-            },
+            st.session_state["last_assistant_response"],
+            "收到你的改进反馈，我会继续优化。",
         )
-        st.success("收到你的改进反馈，我会继续优化。")
     if col_fav.button("⭐ 收藏这套", use_container_width=True):
-        append_jsonl(
+        submit_user_signal(
+            "favorite",
             config.favorites_path,
-            {
-                "ts": now_iso(),
-                "session_id": st.session_state["session_id"],
-                "response": st.session_state["last_assistant_response"],
-            },
+            st.session_state["last_assistant_response"],
+            "已收藏到本地记录。",
         )
-        st.success("已收藏到本地记录。")
