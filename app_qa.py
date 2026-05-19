@@ -189,7 +189,7 @@ if final_prompt:
             "scene": constraints.scene,
             "style": constraints.style,
             "budget": constraints.budget,
-            "failure_reason": failure_reason[:MAX_FAILURE_REASON_LENGTH],
+            "failure_reason": failure_reason,
         },
     )
 
