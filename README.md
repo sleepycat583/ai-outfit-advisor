@@ -69,11 +69,11 @@
 
 ## ⚙️ 使用指南
 
-### 1) 环境要求
+### 环境要求
 - Python 3.10+
 - DashScope API Key（阿里云）
 
-### 2) 安装依赖
+### 安装依赖
 
 ```bash
 git clone https://github.com/sleepycat583/ai-outfit-advisor.git
@@ -81,7 +81,7 @@ cd ai-outfit-advisor
 pip install -r requirements.txt
 ```
 
-### 3) 环境变量配置
+### 环境变量配置
 
 **推荐使用 `.env`（自动加载）：**
 
@@ -99,7 +99,7 @@ export DASHSCOPE_API_KEY="your-api-key"
 export NO_PROXY="dashscope.aliyuncs.com"   # 可选
 ```
 
-### 4) 启动服务
+### 启动服务
 
 ```bash
 # 主应用：AI 穿搭问答
