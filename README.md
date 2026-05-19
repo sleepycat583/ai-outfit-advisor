@@ -4,6 +4,11 @@
 
 一个面向大学生群体的智能穿搭决策助手。融合**大语言模型 (Qwen3-max)**、**RAG 本地知识库 (Chroma)** 与 **Agent 联网搜索 (DuckDuckGo)**，以"顶尖私人穿搭主理人"人设，为不同性别、风格、体型的用户提供面试、约会、早八等高频场景的 OOTD 解决方案。
 
+
+
+<img width="2508" height="1190" alt="image" src="https://github.com/user-attachments/assets/162b3e81-deb7-4da5-9787-d9fcf0fd3fa3" />
+
+
 ---
 
 ## ✨ 核心亮点
