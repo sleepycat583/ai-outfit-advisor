@@ -9,6 +9,12 @@ from langchain_community.chat_models.tongyi import ChatTongyi
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
 from langchain_classic.tools.retriever import create_retriever_tool
+from typing import Any
+from recommendation_rules import (
+    build_constraints,
+    inject_constraints_prompt,
+    stabilize_output,
+)
 
 
 class ConsoleLoggingHandler(BaseCallbackHandler):
@@ -50,6 +56,8 @@ class RagService(object):
 - 性别：{gender}
 - 偏好风格：{style}
 - 身高体重/体型：{body}
+- 核心场景：{scene}
+- 预算偏好：{budget}
 
 【主理人服务法则（必须严格遵守）】
 1. 👑 语气基调：温暖、自信、充满活力，像个懂客户的时尚圈知心好友。严禁使用机械化、AI味浓重的公文套话。
@@ -81,14 +89,34 @@ class RagService(object):
 
         def get_history(session_id: str):
             """根据 session_id 获取历史记录"""
-            return FileChatMessageHistory(session_id=session_id, storage_path="./chat_history")
+            return FileChatMessageHistory(
+                session_id=session_id,
+                storage_path=config.chat_history_path,
+            )
+
+        def apply_constraints(data: Any) -> dict[str, Any]:
+            if not isinstance(data, dict):
+                return {"input": str(data)}
+            constraints = build_constraints(
+                gender=data.get("gender", ""),
+                style=data.get("style", ""),
+                body=data.get("body", ""),
+                scene=data.get("scene", ""),
+                budget=data.get("budget", ""),
+            )
+            payload = dict(data)
+            payload["input"] = inject_constraints_prompt(
+                user_input=data.get("input", ""),
+                constraints=constraints,
+            )
+            return payload
 
         # 1. 创建工具
         search_tool = DuckDuckGoSearchRun()
         retriever_tool = create_retriever_tool(
             retriever,
             "knowledge_base_search",
-            "当用户询问关于服装洗涤、尺码推荐、颜色搭配等通用穿搭知识时，必须使用此工具。"
+            "当用户询问服装洗涤、尺码推荐、颜色搭配及场景穿搭知识时，必须使用此工具。"
         )
         tools = [search_tool, retriever_tool]
 
@@ -111,10 +139,14 @@ class RagService(object):
         # 4. 提取 output，保持与上游（app_qa.py 的 typewriter_stream）的字符串兼容性
         def extract_output(data):
             if isinstance(data, dict):
-                return data.get("output", "")
-            return str(data)
+                return stabilize_output(data.get("output", ""))
+            return stabilize_output(str(data))
 
-        chain = conversation_chain | RunnableLambda(extract_output)
+        chain = (
+            RunnableLambda(apply_constraints)
+            | conversation_chain
+            | RunnableLambda(extract_output)
+        )
         return chain
 
 
@@ -130,6 +162,8 @@ if __name__ == '__main__':
             "gender": "女生",
             "style": "日常休闲",
             "body": "",
+            "scene": "通勤",
+            "budget": "300元以内",
         },
         session_config
     )
