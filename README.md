@@ -139,7 +139,7 @@ ai-outfit-advisor/
 
 ## 👤 Author
 
-**sleepycat583** · <https://github.com/sleepycat583>
+**sleepycat583** · [GitHub](https://github.com/sleepycat583)
 
 ---
 
