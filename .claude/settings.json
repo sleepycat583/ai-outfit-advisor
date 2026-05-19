@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip list *)",
+      "Bash(powershell -Command \"Compress-Archive -Path '/tmp/xiaoyi-pkg/*' -DestinationPath 'c:\\\\Users\\\\user\\\\Desktop\\\\XiaoYi_HTML_Presentation.zip' -Force\")",
+      "Read(//c/Users/user/Desktop/**)",
+      "Bash(cd /tmp/xiaoyi-pkg && pwd && ls -la)",
+      "Read(//tmp/**)",
+      "Bash(python3 -c ' *)",
+      "Bash(cygpath -w /tmp/xiaoyi-pkg)",
+      "Bash(cmd //c \"echo %TEMP%\")",
+      "Bash(c:/Users/user/Desktop/项目1/.venv/Scripts/python.exe -c ' *)"
+    ]
+  }
+}

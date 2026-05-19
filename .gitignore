@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# App data (privacy)
+chat_history/
+data/chroma/

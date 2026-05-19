@@ -59,7 +59,7 @@ class KnowledgeBaseService(object):
 
         self.chroma = Chroma(
             collection_name=config.collection_name,  # 数据库的表名
-            embedding_function=DashScopeEmbeddings(model="text-embedding-v4"),
+            embedding_function=DashScopeEmbeddings(model=config.EMBEDDING_MODEL_NAME),
             persist_directory=config.persist_directory,  # 数据库本地存储文件夹
         )  # 向量存储的实例 Chroma向量库对象
 
@@ -87,7 +87,7 @@ class KnowledgeBaseService(object):
         metadata = {
             "source": filename,
             "create_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "operator": "小曹",
+            "operator": config.DEFAULT_OPERATOR,
         }
 
         # 内容就加载到向量库中了

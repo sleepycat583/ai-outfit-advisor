@@ -1,3 +1,5 @@
+from typing import Optional
+
 from langchain_core.runnables import RunnableWithMessageHistory, RunnableLambda
 from langchain_core.callbacks import BaseCallbackHandler
 from history import FileChatMessageHistory
@@ -9,6 +11,9 @@ from langchain_community.chat_models.tongyi import ChatTongyi
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
 from langchain_classic.tools.retriever import create_retriever_tool
+
+
+FALLBACK_MESSAGE = "小衣当前思考超时，请稍后再试"
 
 
 class ConsoleLoggingHandler(BaseCallbackHandler):
@@ -38,7 +43,7 @@ class ConsoleLoggingHandler(BaseCallbackHandler):
 class RagService(object):
     def __init__(self):
         self.vector_service = VectorStoreService(
-            embedding=DashScopeEmbeddings(model=config.embedding_model_name)
+            embedding=DashScopeEmbeddings(model=config.EMBEDDING_MODEL_NAME)
         )
 
         self.prompt_template = ChatPromptTemplate.from_messages(
@@ -75,13 +80,30 @@ class RagService(object):
 
         self.chain = self.__get_chain()
 
+    def stream(self, inputs: dict, config: Optional[dict] = None):
+        try:
+            return self.chain.stream(inputs, config=config)
+        except Exception:
+            def _fallback():
+                yield FALLBACK_MESSAGE
+            return _fallback()
+
+    def invoke(self, inputs: dict, config: Optional[dict] = None):
+        try:
+            return self.chain.invoke(inputs, config=config)
+        except Exception:
+            return FALLBACK_MESSAGE
+
     def __get_chain(self):
         """获取最终的执行链"""
         retriever = self.vector_service.get_retriever()
 
         def get_history(session_id: str):
             """根据 session_id 获取历史记录"""
-            return FileChatMessageHistory(session_id=session_id, storage_path="./chat_history")
+            return FileChatMessageHistory(
+                session_id=session_id,
+                storage_path=config.CHAT_HISTORY_DIR,
+            )
 
         # 1. 创建工具
         search_tool = DuckDuckGoSearchRun()
@@ -124,7 +146,7 @@ if __name__ == '__main__':
             "session_id": "user_001",
         }
     }
-    res = RagService().chain.invoke(
+    res = RagService().invoke(
         {
             "input": "羽绒服怎么处理",
             "gender": "女生",
