@@ -17,6 +17,15 @@
 
 ---
 
+## 🚀 最新优化与亮点
+
+- **模块化检索层**：提取 `vector_store_service.py` 统一封装 Chroma 初始化与 Retriever 构建，`rag.py` 聚焦 Agent 逻辑。
+- **配置分层与自动加载**：`config_data.py` 集中管理模型名、切分参数、向量库路径等，同时支持 `.env` 自动读取。
+- **RAG 检索链路强化**：Retriever Tool 直连知识库，检索返回数量通过 `similarity_threshold` 控制。
+- **会话可靠性提升**：文件型历史记录引入锁与原子写入，避免并发写入导致的损坏。
+
+---
+
 ## 🏗️ 系统架构
 
 ```
@@ -48,6 +57,18 @@
 │  └──────────┘  └──────────┘  └───────────────┘  │
 └─────────────────────────────────────────────────┘
 ```
+
+**RAG 检索流程补充**
+1. `app_qa.py` 收集用户画像（性别/风格/体型）与问题。
+2. `RagService` 组装 Prompt + Tool Calling Agent。
+3. Agent 根据问题决定调用 **知识库检索** 或 **联网搜索**。
+4. 知识库检索通过 `VectorStoreService → Chroma` 返回相关片段。
+5. 最终由 `ChatTongyi (Qwen3-max)` 统一生成回答，Streamlit 端打字机式流式输出。
+
+**LLM 调用逻辑补充**
+- 使用 DashScope 的 `qwen3-max` 作为主模型。
+- Agent 模式下允许工具调用，但对用户侧隐藏工具细节。
+- `ConsoleLoggingHandler` 与 Streamlit `status` 同步输出推理/检索状态。
 
 ---
 
@@ -91,6 +112,15 @@ export DASHSCOPE_API_KEY="your-api-key"
 
 > 如遇本地代理拦截 DashScope 请求（ProxyError），代码已在入口处设置 `NO_PROXY=dashscope.aliyuncs.com` 白名单绕过。
 
+**补充：支持 `.env` 自动加载（推荐）**
+
+```bash
+# .env
+DASHSCOPE_API_KEY=your-api-key
+# 可选：本地代理环境下为 DashScope 绕过代理
+NO_PROXY=dashscope.aliyuncs.com
+```
+
 ### 启动
 
 ```bash
@@ -100,6 +130,10 @@ streamlit run app_qa.py
 # 知识库管理 — 上传 .txt 素材
 streamlit run app_file_uploader.py
 ```
+
+**运行逻辑补充**
+- `app_file_uploader.py` 负责入库与去重，建议先导入资料再启动问答端。
+- `app_qa.py` 通过 `RagService` 调用 Agent，回答支持流式打字机效果与状态提示。
 
 ---
 
