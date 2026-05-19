@@ -46,11 +46,10 @@ def is_rate_limited() -> bool:
     st.session_state["request_timestamps"] = [
         t for t in timestamps if now - t <= REQUEST_WINDOW_SECONDS
     ]
-    if len(st.session_state["request_timestamps"]) >= MAX_REQUESTS_PER_WINDOW:
+    st.session_state["request_timestamps"].append(now)
+    if len(st.session_state["request_timestamps"]) > MAX_REQUESTS_PER_WINDOW:
         return True
-    else:
-        st.session_state["request_timestamps"].append(now)
-        return False
+    return False
 
 st.set_page_config(page_title="RAG Question Answering", layout="wide")
 
@@ -158,7 +157,8 @@ if final_prompt:
                 res = st.write_stream(typewriter_stream(stream))
             except Exception as e:
                 success = False
-                failure_reason = f"{type(e).__name__}: model_or_tool_call_failed"
+                safe_detail = str(e).replace("\n", " ").replace("\r", " ")[:120]
+                failure_reason = f"{type(e).__name__}: {safe_detail}"
                 res = fallback_response(user_scene, user_style, user_budget, user_body)
                 st.write(res)
     st.session_state["message"].append({"role": "assistant", "content": res})
