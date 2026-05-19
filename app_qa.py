@@ -158,7 +158,7 @@ if final_prompt:
                 res = st.write_stream(typewriter_stream(stream))
             except Exception as e:
                 success = False
-                failure_reason = str(e)
+                failure_reason = f"{type(e).__name__}: model_or_tool_call_failed"
                 res = fallback_response(user_scene, user_style, user_budget, user_body)
                 st.write(res)
     st.session_state["message"].append({"role": "assistant", "content": res})

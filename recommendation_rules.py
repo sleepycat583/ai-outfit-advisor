@@ -59,11 +59,11 @@ def inject_constraints_prompt(user_input: str, constraints: OutfitConstraints) -
 def stabilize_output(text: str) -> str:
     parts = [text or ""]
     output = parts[0]
-    if "⛅" not in output:
+    if "【场景与温度感知】" not in output:
         parts.insert(0, "⛅ 【场景与温度感知】\n已结合你的场景信息生成建议。\n\n")
-    if "✨" not in output:
+    if "【主理人 OOTD 灵感】" not in output:
         parts.append("\n\n✨ 【主理人 OOTD 灵感】\n建议围绕基础款与配色层次构建穿搭。")
-    if "💡" not in output:
+    if "【小衣私藏贴士】" not in output:
         parts.append("\n\n💡 【小衣私藏贴士】\n先确保版型合身，再做风格强化，效果更稳定。")
     signature = config.assistant_signature
     if signature not in output:
