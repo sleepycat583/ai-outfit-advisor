@@ -88,7 +88,7 @@ pip install -r requirements.txt
 ```bash
 # .env
 DASHSCOPE_API_KEY=your-api-key
-# 可选：本地代理环境下绕过 DashScope
+# 可选：本地代理环境下为 DashScope 绕过代理
 NO_PROXY=dashscope.aliyuncs.com
 ```
 
@@ -96,7 +96,7 @@ NO_PROXY=dashscope.aliyuncs.com
 
 ```bash
 export DASHSCOPE_API_KEY="your-api-key"
-export NO_PROXY="dashscope.aliyuncs.com"   # 可选：本地代理环境下使用
+export NO_PROXY="dashscope.aliyuncs.com"   # 可选：本地代理环境下为 DashScope 绕过代理
 ```
 
 ### 启动服务
