@@ -63,14 +63,18 @@ class FileChatMessageHistory(BaseChatMessageHistory):
             os.fsync(f.fileno())
         os.replace(temp_path, self.file_path)
 
+    def _append_messages_unlocked(self, new_messages: list[dict]) -> None:
+        if not new_messages:
+            return
+        messages_data = self._read_messages_data_unlocked()
+        messages_data.extend(new_messages)
+        self._atomic_write(messages_data)
+
     def add_messages(self, messages: Sequence[BaseMessage]) -> None:
         lock_path = f"{self.file_path}.lock"
         with _file_lock(lock_path):
-            messages_data = self._read_messages_data_unlocked()
-            messages_data.extend(
-                [message_to_dict(message) for message in messages]
-            )
-            self._atomic_write(messages_data)
+            new_messages = [message_to_dict(message) for message in messages]
+            self._append_messages_unlocked(new_messages)
 
     @property
     def messages(self) -> list[BaseMessage]:

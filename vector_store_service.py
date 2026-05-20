@@ -1,3 +1,5 @@
+import os
+
 from langchain_chroma import Chroma
 import config_data as config
 
@@ -9,11 +11,20 @@ class VectorStoreService(object):
         """
         self.embedding = embedding
 
+        persist_directory = config.persist_directory
+        needs_rebuild = (not os.path.isdir(persist_directory)) or (not any(os.scandir(persist_directory)))
+        if needs_rebuild:
+            print("⚠️ [警告] Chroma 数据库目录缺失或为空，正在触发自愈重建", flush=True)
+            os.makedirs(persist_directory, exist_ok=True)
+
         self.vector_store = Chroma(
             collection_name=config.collection_name,
             embedding_function=self.embedding,
-            persist_directory=config.persist_directory,
+            persist_directory=persist_directory,
         )
+
+        if needs_rebuild and hasattr(self.vector_store, "persist"):
+            self.vector_store.persist()
 
     def get_retriever(self):
         """返回向量库检索器，方便加入 Chain"""

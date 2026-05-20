@@ -1,6 +1,7 @@
 import os
 import uuid
 import time
+import datetime
 import streamlit as st
 import config_data as config
 from langchain_core.callbacks import BaseCallbackHandler
@@ -43,7 +44,6 @@ class StreamlitStatusHandler(BaseCallbackHandler):
         else:
             message = f"🧰 正在调用工具：{tool_name}"
         self.status.update(label=message, state="running")
-        self.status.write(message)
 
     def on_tool_end(self, output, **kwargs):
         self.status.update(label="✅ 已获取参考资料", state="running")
@@ -336,6 +336,7 @@ if final_prompt:
                         "gender": user_gender,
                         "style": user_style,
                         "body": user_body,
+                        "current_date": datetime.datetime.now().strftime("%Y年%m月%d日"),
                     },
                     config={
                         "configurable": {"session_id": st.session_state["session_id"]},
