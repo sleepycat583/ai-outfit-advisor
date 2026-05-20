@@ -220,3 +220,6 @@ __marimo__/
 # App data (privacy)
 chat_history/
 data/chroma/
+
+# GitHub Copilot CLI local config
+.claude/
