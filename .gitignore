@@ -223,3 +223,7 @@ data/chroma/
 
 # GitHub Copilot CLI local config
 .claude/
+
+# Presentation & generated files
+*.pptx
+*.bas
