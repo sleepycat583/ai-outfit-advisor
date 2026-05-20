@@ -22,11 +22,15 @@ uploader_file = st.file_uploader(
 if "service" not in st.session_state:
     st.session_state["service"] = KnowledgeBaseService()
 
+if "uploaded_file_id" not in st.session_state:
+    st.session_state["uploaded_file_id"] = None
+
 if uploader_file is not None:
     # 提取文件的信息
     file_name = uploader_file.name
     file_type = uploader_file.type
     file_size = uploader_file.size / 1024   # KB
+    current_file_id = id(uploader_file)
 
     st.subheader(f"文件名: {file_name}")
     st.write(f"格式: {file_type} | 大小: {file_size:.2f} KB")
@@ -47,7 +51,11 @@ if uploader_file is not None:
 
     st.caption(f"检测到编码: {used_encoding}")
 
-    with st.spinner("载入知识库中..."):
-        time.sleep(1)
-        result = st.session_state["service"].upload_by_str(text, file_name)
-        st.write(result)
+    if st.session_state["uploaded_file_id"] != current_file_id:
+        with st.spinner("载入知识库中..."):
+            time.sleep(1)
+            result = st.session_state["service"].upload_by_str(text, file_name)
+            st.write(result)
+            st.session_state["uploaded_file_id"] = current_file_id
+    else:
+        st.info("此文件已上传，无需重复处理")

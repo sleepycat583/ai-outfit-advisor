@@ -6,7 +6,7 @@ import os
 import hashlib
 import datetime
 import config_data as config
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 

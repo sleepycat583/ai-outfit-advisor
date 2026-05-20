@@ -263,6 +263,33 @@ div[data-testid="stNotification"] {
   ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
   ::-webkit-scrollbar-thumb:hover { background: #484f58; }
 }
+
+/* ===== 终极修复：强制固定并抬高底部输入框 ===== */
+div[data-testid="stChatInput"] {
+  position: fixed !important;
+  bottom: 2rem !important;
+  left: 20rem !important;
+  right: 2rem !important;
+  width: auto !important;
+  z-index: 9999 !important;
+  background-color: var(--bg-primary) !important;
+  border: 1px solid var(--border-color) !important;
+  border-radius: 12px !important;
+  box-shadow: var(--shadow-md) !important;
+  padding: 0.5rem !important;
+}
+
+@media (max-width: 991px) {
+  div[data-testid="stChatInput"] {
+    left: 1.5rem !important;
+    right: 1.5rem !important;
+    bottom: 1.5rem !important;
+  }
+}
+
+[data-testid="stAppViewContainer"] > .main .block-container {
+  padding-bottom: 180px !important;
+}
 </style>"""
 st.markdown(cozy_css, unsafe_allow_html=True)
 
@@ -385,28 +412,32 @@ with tab_chat:
         st.session_state["message"].append({"role": "user", "content": final_prompt})
 
         with st.chat_message("assistant"):
-            with st.status("🧵 小衣正在梳理搭配思路...", expanded=True) as status:
-                handler = StreamlitStatusHandler(status)
-                try:
-                    stream = st.session_state["rag"].stream(
-                        {
-                            "input": final_prompt,
-                            "gender": user_gender,
-                            "style": user_style,
-                            "body": user_body,
-                            "current_date": datetime.datetime.now().strftime("%Y年%m月%d日"),
-                        },
-                        config={
-                            "configurable": {"session_id": st.session_state["session_id"]},
-                            "callbacks": [ConsoleLoggingHandler(), handler],
-                        },
-                    )
-                    res = st.write_stream(typewriter_stream(stream))
-                    status.update(label="✅ 穿搭建议已生成", state="complete", expanded=False)
-                except Exception:
-                    res = FALLBACK_MESSAGE
-                    status.update(label="⚠️ 小衣当前思考超时，请稍后再试", state="error", expanded=False)
-                    st.write(res)
+            status = st.status("🧵 小衣正在梳理搭配思路...", expanded=True)
+            handler = StreamlitStatusHandler(status)
+
+            try:
+                stream = st.session_state["rag"].stream(
+                    {
+                        "input": final_prompt,
+                        "gender": user_gender,
+                        "style": user_style,
+                        "body": user_body,
+                        "current_date": datetime.datetime.now().strftime("%Y年%m月%d日"),
+                    },
+                    config={
+                        "configurable": {"session_id": st.session_state["session_id"]},
+                        "callbacks": [ConsoleLoggingHandler(), handler],
+                    },
+                )
+
+                res = st.write_stream(typewriter_stream(stream))
+
+                status.update(label="✅ 穿搭建议已生成", state="complete", expanded=False)
+
+            except Exception:
+                res = FALLBACK_MESSAGE
+                status.update(label="⚠️ 小衣当前思考超时，请稍后再试", state="error", expanded=False)
+                st.write(res)
         st.session_state["message"].append({"role": "assistant", "content": res})
 
 with tab_wardrobe:
