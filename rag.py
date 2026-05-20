@@ -1,9 +1,11 @@
 from typing import Optional
 import datetime
+import copy
+import json
 
 from langchain_core.runnables import RunnableWithMessageHistory, RunnableLambda
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage
 from langchain_core.tools import Tool
 from history import FileChatMessageHistory
 from vector_store_service import VectorStoreService
@@ -140,6 +142,99 @@ class RagService(object):
         except Exception:
             return FALLBACK_MESSAGE
 
+    def _weather_search(self, query: str) -> str:
+        current_year = datetime.datetime.now().year
+        current_month = datetime.datetime.now().month
+        query_with_date = f"{query} {current_year}年{current_month}月"
+        return DuckDuckGoSearchRun().run(query_with_date)
+
+    def _extract_json_content(self, content: str) -> str:
+        if "```" in content:
+            stripped = content.strip()
+            if stripped.startswith("```"):
+                stripped = stripped.strip("`")
+            stripped = stripped.replace("json", "", 1).strip()
+            return stripped
+        return content.strip()
+
+    def _format_wardrobe_items(self, items: list[dict]) -> str:
+        lines = []
+        for item in items:
+            item_id = item.get("id", "")
+            category = item.get("category", "")
+            sub_category = item.get("sub_category", "")
+            color = item.get("color", "")
+            material = item.get("material", "")
+            season = item.get("season", "")
+            lines.append(
+                f"- id:{item_id} 类别:{category}/{sub_category} 颜色:{color} 材质:{material} 适季:{season}"
+            )
+        return "\n".join(lines) if lines else "暂无可用单品"
+
+    def generate_weekly_plan(
+        self,
+        gender: str,
+        style: str,
+        body: str,
+        current_date: str,
+        wardrobe_items: list[dict],
+    ) -> list[dict]:
+        weather_info = self._weather_search("未来一周 天气")
+        available_items = copy.deepcopy(wardrobe_items or [])
+        recent_core_ids: list[str] = []
+        results: list[dict] = []
+        theme_pool = [
+            "轻松通勤感",
+            "温柔日常感",
+            "活力运动感",
+            "简约高级感",
+            "甜酷混搭感",
+            "松弛休闲感",
+            "精致约会感",
+        ]
+
+        for day_index in range(7):
+            theme = theme_pool[day_index % len(theme_pool)]
+            today_available = [
+                item for item in available_items if item.get("id") not in recent_core_ids
+            ]
+            core_item = today_available[0] if today_available else None
+            core_item_name = ""
+            if core_item:
+                core_item_name = (
+                    f"{core_item.get('color', '')}{core_item.get('material', '')}"
+                    f"{core_item.get('sub_category') or core_item.get('category', '')}"
+                )
+
+            prompt = (
+                "你是一位专业时尚分析师与私人穿搭主理人，只能输出 JSON。\n"
+                "请基于用户画像、天气与衣橱信息，给出今日穿搭计划。\n"
+                "输出 JSON 结构必须包含：scene, ootd, tips。\n"
+                "scene 为一句场景感知；ootd 为数组，元素是穿搭单品描述，"
+                "必须标注【自有】或【建议购入】并加粗单品名；tips 为一句小贴士。\n\n"
+                f"【当前日期】{current_date}\n"
+                f"【未来天气】{weather_info}\n"
+                f"【今日风格主题】{theme}\n"
+                f"【用户画像】性别:{gender} 风格:{style} 体型:{body}\n"
+                f"【今日核心单品】{core_item_name or '无'}\n"
+                "【可用衣橱清单】\n"
+                f"{self._format_wardrobe_items(today_available)}\n"
+            )
+
+            response = self.chat_model.invoke(
+                [SystemMessage(content="仅输出 JSON，不要出现多余文本。"), HumanMessage(content=prompt)]
+            )
+            content = response.content if hasattr(response, "content") else str(response)
+            content_text = self._extract_json_content(str(content))
+            day_result = json.loads(content_text)
+            results.append(day_result)
+
+            if core_item and core_item.get("id"):
+                recent_core_ids.append(core_item.get("id"))
+                recent_core_ids = recent_core_ids[-2:]
+
+        return results
+
     def __get_chain(self):
         """获取最终的执行链"""
         retriever = self.vector_service.get_retriever()
@@ -152,19 +247,13 @@ class RagService(object):
             )
 
         # 1. 创建工具
-        def weather_search(query: str) -> str:
-            current_year = datetime.datetime.now().year
-            current_month = datetime.datetime.now().month
-            query_with_date = f"{query} {current_year}年{current_month}月"
-            return DuckDuckGoSearchRun().run(query_with_date)
-
         search_tool = Tool(
             name="weather_search",
             description=(
                 "用于查询天气/趋势的联网搜索工具。搜索结果中如果包含多个日期的天气数据，"
                 "只使用距离今天最近的数据，忽略超过3天前的数据。"
             ),
-            func=weather_search,
+            func=self._weather_search,
         )
         retriever_tool = create_retriever_tool(
             retriever,

@@ -6,6 +6,7 @@ import streamlit as st
 import config_data as config
 from langchain_core.callbacks import BaseCallbackHandler
 from rag import RagService, ConsoleLoggingHandler, FALLBACK_MESSAGE
+from wardrobe_service import WardrobeService
 
 # 强制指定阿里云 DashScope 接口不走本地代理，解决 ProxyError
 if config.NO_PROXY:
@@ -237,6 +238,17 @@ div[data-testid="stChatMessage"]:has(div[data-testid="stChatMessageAvatarAssista
   border-color: var(--accent) transparent transparent transparent !important;
 }
 
+/* ===== 删除按钮 ===== */
+button[aria-label="❌ 移除此单品"] {
+  background: #ff5a5f !important;
+  border-color: #ff5a5f !important;
+  color: #ffffff !important;
+}
+button[aria-label="❌ 移除此单品"]:hover {
+  background: #ff3b3f !important;
+  border-color: #ff3b3f !important;
+}
+
 /* ===== 成功/提示消息 ===== */
 div[data-testid="stNotification"] {
   background: var(--bg-secondary);
@@ -265,6 +277,12 @@ if "rag" not in st.session_state:
 
 if "session_id" not in st.session_state:
     st.session_state["session_id"] = uuid.uuid4().hex
+
+if "wardrobe_draft" not in st.session_state:
+    st.session_state["wardrobe_draft"] = None
+
+if "weekly_plan" not in st.session_state:
+    st.session_state["weekly_plan"] = None
 
 with st.sidebar:
     st.header("👤 我的穿搭档案")
@@ -299,54 +317,165 @@ with st.sidebar:
         st.success("服务已重置，正在重新加载...")
         st.rerun()
 
-for message in st.session_state["message"]:
-    st.chat_message(message["role"]).write(message["content"])
+tab_chat, tab_wardrobe = st.tabs(["💬 穿搭顾问", "👗 智能衣橱"])
 
-# --- 新增：快捷提问按钮 ---
-preset_prompt = None
-col1, col2, col3 = st.columns(3)
-with col1:
-    if st.button("👔 明天参加社团面试，求推荐穿搭！", use_container_width=True):
-        preset_prompt = "明天参加社团面试，求推荐穿搭！"
-with col2:
-    if st.button("🧥 我的羽绒服弄脏了，应该怎么洗？", use_container_width=True):
-        preset_prompt = "我的羽绒服弄脏了，应该怎么洗？"
-with col3:
-    if st.button("👗 我身高160，体重100斤，适合什么尺码？", use_container_width=True):
-        preset_prompt = "我身高160，体重100斤，适合什么尺码？"
+with tab_chat:
+    wardrobe_service = WardrobeService()
+    wardrobe_items = wardrobe_service.get_all_items()
 
-# --- 接收用户输入 ---
-prompt = st.chat_input("例如：明天要去互联网公司面试实习生，我该怎么穿？")
+    st.markdown("#### 📅 本周穿搭计划")
+    plan_col, hint_col = st.columns([1, 3])
+    with plan_col:
+        generate_plan = st.button("📅 生成本周穿搭计划", use_container_width=True)
+    with hint_col:
+        if not wardrobe_items:
+            st.caption("快去‘智能衣橱’拍照上传你的第一件美衣吧！")
 
-# --- 处理逻辑 ---
-final_prompt = prompt or preset_prompt
+    if generate_plan:
+        if not wardrobe_items:
+            st.info("快去‘智能衣橱’拍照上传你的第一件美衣吧！")
+        else:
+            progress = st.progress(5, text="正在生成本周穿搭计划...")
+            plan = st.session_state["rag"].generate_weekly_plan(
+                gender=user_gender,
+                style=user_style,
+                body=user_body,
+                current_date=datetime.datetime.now().strftime("%Y年%m月%d日"),
+                wardrobe_items=wardrobe_items,
+            )
+            progress.progress(100, text="本周穿搭计划已生成")
+            st.session_state["weekly_plan"] = plan
 
-if final_prompt:
-    # 在页面输出用户的提问
-    st.chat_message("user").write(final_prompt)
-    st.session_state["message"].append({"role": "user", "content": final_prompt})
+    weekly_plan = st.session_state.get("weekly_plan")
+    if weekly_plan:
+        week_tabs = st.tabs(["周一", "周二", "周三", "周四", "周五", "周六", "周日"])
+        for day_tab, day_plan in zip(week_tabs, weekly_plan):
+            with day_tab:
+                st.markdown(f"**场景感知：**{day_plan.get('scene', '')}")
+                st.markdown("**OOTD 灵感：**")
+                for item in day_plan.get("ootd", []):
+                    st.markdown(f"- **{item}**")
+                st.markdown(f"**小贴士：**{day_plan.get('tips', '')}")
 
-    with st.chat_message("assistant"):
-        with st.status("🧵 小衣正在梳理搭配思路...", expanded=True) as status:
-            handler = StreamlitStatusHandler(status)
-            try:
-                stream = st.session_state["rag"].stream(
-                    {
-                        "input": final_prompt,
-                        "gender": user_gender,
-                        "style": user_style,
-                        "body": user_body,
-                        "current_date": datetime.datetime.now().strftime("%Y年%m月%d日"),
-                    },
-                    config={
-                        "configurable": {"session_id": st.session_state["session_id"]},
-                        "callbacks": [ConsoleLoggingHandler(), handler],
-                    },
-                )
-                res = st.write_stream(typewriter_stream(stream))
-                status.update(label="✅ 穿搭建议已生成", state="complete", expanded=False)
-            except Exception:
-                res = FALLBACK_MESSAGE
-                status.update(label="⚠️ 小衣当前思考超时，请稍后再试", state="error", expanded=False)
-                st.write(res)
-    st.session_state["message"].append({"role": "assistant", "content": res})
+    for message in st.session_state["message"]:
+        st.chat_message(message["role"]).write(message["content"])
+
+    # --- 新增：快捷提问按钮 ---
+    preset_prompt = None
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("👔 明天参加社团面试，求推荐穿搭！", use_container_width=True):
+            preset_prompt = "明天参加社团面试，求推荐穿搭！"
+    with col2:
+        if st.button("🧥 我的羽绒服弄脏了，应该怎么洗？", use_container_width=True):
+            preset_prompt = "我的羽绒服弄脏了，应该怎么洗？"
+    with col3:
+        if st.button("👗 我身高160，体重100斤，适合什么尺码？", use_container_width=True):
+            preset_prompt = "我身高160，体重100斤，适合什么尺码？"
+
+    # --- 接收用户输入 ---
+    prompt = st.chat_input("例如：明天要去互联网公司面试实习生，我该怎么穿？")
+
+    # --- 处理逻辑 ---
+    final_prompt = prompt or preset_prompt
+
+    if final_prompt:
+        # 在页面输出用户的提问
+        st.chat_message("user").write(final_prompt)
+        st.session_state["message"].append({"role": "user", "content": final_prompt})
+
+        with st.chat_message("assistant"):
+            with st.status("🧵 小衣正在梳理搭配思路...", expanded=True) as status:
+                handler = StreamlitStatusHandler(status)
+                try:
+                    stream = st.session_state["rag"].stream(
+                        {
+                            "input": final_prompt,
+                            "gender": user_gender,
+                            "style": user_style,
+                            "body": user_body,
+                            "current_date": datetime.datetime.now().strftime("%Y年%m月%d日"),
+                        },
+                        config={
+                            "configurable": {"session_id": st.session_state["session_id"]},
+                            "callbacks": [ConsoleLoggingHandler(), handler],
+                        },
+                    )
+                    res = st.write_stream(typewriter_stream(stream))
+                    status.update(label="✅ 穿搭建议已生成", state="complete", expanded=False)
+                except Exception:
+                    res = FALLBACK_MESSAGE
+                    status.update(label="⚠️ 小衣当前思考超时，请稍后再试", state="error", expanded=False)
+                    st.write(res)
+        st.session_state["message"].append({"role": "assistant", "content": res})
+
+with tab_wardrobe:
+    st.subheader("👗 智能衣橱")
+    service = WardrobeService()
+
+    uploaded_file = st.file_uploader("上传衣服照片", type=["jpg", "jpeg", "png", "webp"])
+    if uploaded_file:
+        st.image(uploaded_file, width=260)
+        if st.button("🔍 智能识衣并入库"):
+            with st.spinner("正在识别衣物信息..."):
+                analysis = service.analyze_clothing_image(uploaded_file.getvalue())
+            st.session_state["wardrobe_draft"] = analysis
+
+    draft = st.session_state.get("wardrobe_draft")
+    if draft:
+        st.markdown("#### 识别结果（可手动调整）")
+        category_options = config.WARDROBE_CATEGORIES
+        draft_category = draft.get("category")
+        if draft_category in category_options:
+            category_index = category_options.index(draft_category)
+        else:
+            category_index = 0
+        category = st.selectbox("一级分类", category_options, index=category_index)
+        sub_category = st.text_input("细分类别", value=draft.get("sub_category", ""))
+        color = st.text_input("颜色", value=draft.get("color", ""))
+        material = st.text_input("材质", value=draft.get("material", ""))
+        season_options = ["春", "夏", "秋", "冬"]
+        season_value = draft.get("season", [])
+        if isinstance(season_value, str):
+            season_value = [season_value]
+        season_default = [s for s in season_value if s in season_options]
+        season = st.multiselect("适合季节", season_options, default=season_default)
+
+        if st.button("✅ 确认加入衣橱"):
+            item_data = {
+                "category": category,
+                "sub_category": sub_category,
+                "color": color,
+                "material": material,
+                "season": season,
+            }
+            service.add_item(item_data)
+            st.session_state["wardrobe_draft"] = None
+            st.success("已加入衣橱")
+            st.rerun()
+
+    st.markdown("### 我的衣橱")
+    items = service.get_all_items()
+    if not items:
+        st.info("还没有衣物记录，先上传一张照片吧。")
+    else:
+        icon_map = {
+            "外套": "🧥",
+            "内搭": "👕",
+            "下装": "👖",
+            "鞋履": "👟",
+            "配饰": "🧢",
+        }
+        cols = st.columns(4)
+        for index, item in enumerate(items):
+            col = cols[index % 4]
+            with col:
+                category = item.get("category", "")
+                icon = icon_map.get(category, "👗")
+                title = item.get("sub_category") or category or "未命名"
+                st.markdown(f"#### {icon} {title}")
+                st.write(f"颜色：{item.get('color', '未知')}")
+                st.write(f"材质：{item.get('material', '未知')}")
+                if st.button("❌ 移除此单品", key=f"delete_{item.get('id')}"):
+                    service.delete_item(item.get("id"))
+                    st.rerun()

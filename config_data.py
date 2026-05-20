@@ -47,3 +47,7 @@ session_config = {
         "session_id": "user_001",
     }
 }
+
+WARDROBE_FILE_PATH = "./data/wardrobe.json"
+VISUAL_MODEL_NAME = "qwen-vl-max"
+WARDROBE_CATEGORIES = ["外套", "内搭", "下装", "鞋履", "配饰"]

@@ -224,6 +224,14 @@ data/chroma/
 # GitHub Copilot CLI local config
 .claude/
 
-# Presentation & generated files
-*.pptx
-*.bas
+#md5.text
+md5.txt
+
+
+#
+.DS_Store
+Thumbs.db
+
+# Local presentation and macro files
+小衣_比赛答辩.pptx
+小衣_动画宏.bas
