@@ -55,7 +55,18 @@ class WardrobeService:
         if os.path.getsize(self.file_path) == 0:
             return []
         with open(self.file_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            items = json.load(f)
+        # 兜底去重：按 id 去重，保留首次出现的条目
+        seen = set()
+        deduped = []
+        for item in items:
+            iid = item.get("id")
+            if iid and iid in seen:
+                continue
+            if iid:
+                seen.add(iid)
+            deduped.append(item)
+        return deduped
 
     def _atomic_write(self, data: list[dict]) -> None:
         temp_path = f"{self.file_path}.tmp"
@@ -177,9 +188,91 @@ class WardrobeService:
             self._atomic_write(items)
             return new_item
 
+    def update_item(self, item_id: str, new_data: dict) -> dict | None:
+        """更新指定 ID 的单品数据，返回更新后的 dict 或 None。"""
+        lock_path = f"{self.file_path}.lock"
+        with _file_lock(lock_path):
+            items = self._read_items_unlocked()
+            for item in items:
+                if item.get("id") == item_id:
+                    item.update(new_data)
+                    self._atomic_write(items)
+                    return item
+        return None
+
     def delete_item(self, item_id: str) -> None:
         lock_path = f"{self.file_path}.lock"
         with _file_lock(lock_path):
             items = self._read_items_unlocked()
             filtered_items = [item for item in items if item.get("id") != item_id]
             self._atomic_write(filtered_items)
+
+    def export_to_csv(self) -> str:
+        """将衣橱数据导出为 CSV 字符串。"""
+        import csv as csv_module
+
+        items = self.get_all_items()
+        output = io.StringIO()
+        fieldnames = ["id", "category", "sub_category", "color", "material", "season", "created_at"]
+        writer = csv_module.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for item in items:
+            row = {k: item.get(k, "") for k in fieldnames}
+            if isinstance(row.get("season"), list):
+                row["season"] = "|".join(row["season"])
+            writer.writerow(row)
+        return output.getvalue()
+
+    def import_from_csv(self, csv_text: str, mode: str = "append") -> int:
+        """从 CSV 文本导入单品。mode='append' 追加，'replace' 覆盖。返回导入数量。"""
+        import csv as csv_module
+
+        reader = csv_module.DictReader(io.StringIO(csv_text))
+        if not reader.fieldnames or "category" not in reader.fieldnames:
+            raise ValueError("CSV 缺少必要字段 'category'")
+
+        new_items = []
+        for row in reader:
+            cat = (row.get("category") or "").strip()
+            if not cat:
+                continue
+            season_raw = (row.get("season") or "").strip()
+            season_list = [s.strip() for s in season_raw.split("|") if s.strip()] if season_raw else []
+            new_items.append({
+                "id": (row.get("id") or str(uuid.uuid4())).strip(),
+                "category": cat,
+                "sub_category": (row.get("sub_category") or "").strip(),
+                "color": (row.get("color") or "").strip(),
+                "material": (row.get("material") or "").strip(),
+                "season": season_list,
+                "created_at": (row.get("created_at") or datetime.now().isoformat(timespec="seconds")).strip(),
+            })
+
+        if not new_items:
+            return 0
+
+        # CSV 内部去重（同 ID 只保留第一条）
+        seen_ids = set()
+        deduped = []
+        for item in new_items:
+            iid = item["id"]
+            if iid in seen_ids:
+                continue
+            seen_ids.add(iid)
+            deduped.append(item)
+        new_items = deduped
+
+        lock_path = f"{self.file_path}.lock"
+        with _file_lock(lock_path):
+            if mode == "replace":
+                self._atomic_write(new_items)
+                return len(new_items)
+            else:
+                items = self._read_items_unlocked()
+                existing_ids = {item.get("id") for item in items}
+                truly_new = [item for item in new_items if item["id"] not in existing_ids]
+                if not truly_new:
+                    return 0
+                items.extend(truly_new)
+                self._atomic_write(items)
+                return len(truly_new)
