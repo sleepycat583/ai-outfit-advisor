@@ -334,6 +334,7 @@ with st.sidebar:
     user_body = st.text_input(
         "📏 输入你的身高/体重 (选填)", placeholder="例如：165cm / 50kg"
     )
+    user_city = st.text_input("📍 所在城市", value="北京", placeholder="例如：上海、广州、成都")
 
     with st.expander("🛠️ 开发者模式 (调试信息)", expanded=False):
         st.text(f"Session ID: {st.session_state['session_id']}")
@@ -367,6 +368,7 @@ with tab_chat:
                 gender=user_gender,
                 style=user_style,
                 body=user_body,
+                city=user_city,
                 current_date=datetime.datetime.now().strftime("%Y年%m月%d日"),
                 wardrobe_items=wardrobe_items,
             )
@@ -375,13 +377,45 @@ with tab_chat:
 
     weekly_plan = st.session_state.get("weekly_plan")
     if weekly_plan:
-        week_tabs = st.tabs(["周一", "周二", "周三", "周四", "周五", "周六", "周日"])
+        # 动态推演未来7天日期
+        today = datetime.datetime.now()
+        weekdays_map = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        tab_titles = []
+
+        for i in range(7):
+            target_date = today + datetime.timedelta(days=i)
+            date_str = target_date.strftime("%m-%d")
+            weekday_str = weekdays_map[target_date.weekday()]
+
+            if i == 0:
+                tab_titles.append(f"今天 ({date_str})")
+            elif i == 1:
+                tab_titles.append(f"明天 ({date_str})")
+            else:
+                tab_titles.append(f"{weekday_str} ({date_str})")
+
+        week_tabs = st.tabs(tab_titles)
+
         for day_tab, day_plan in zip(week_tabs, weekly_plan):
             with day_tab:
                 st.markdown(f"**场景感知：**{day_plan.get('scene', '')}")
                 st.markdown("**OOTD 灵感：**")
+                wardrobe_dict = {w_item.get('id'): w_item for w_item in wardrobe_items}
                 for item in day_plan.get("ootd", []):
-                    st.markdown(f"- **{item}**")
+                    if isinstance(item, str):
+                        st.markdown(f"- {item}")
+                    else:
+                        desc = item.get("desc", "")
+                        item_id = item.get("id", "")
+                        col_text, col_btn = st.columns([5, 1])
+                        with col_text:
+                            st.markdown(f"- {desc}")
+                        with col_btn:
+                            if item_id and item_id in wardrobe_dict:
+                                img_path = wardrobe_dict[item_id].get("image_path")
+                                if img_path and os.path.exists(img_path):
+                                    with st.popover("🖼️ 查看"):
+                                        st.image(img_path, use_container_width=True)
                 st.markdown(f"**小贴士：**{day_plan.get('tips', '')}")
 
     for message in st.session_state["message"]:
@@ -455,35 +489,57 @@ with tab_wardrobe:
     draft = st.session_state.get("wardrobe_draft")
     if draft:
         st.markdown("#### 识别结果（可手动调整）")
+        draft_list = draft if isinstance(draft, list) else [draft]
         category_options = config.WARDROBE_CATEGORIES
-        draft_category = draft.get("category")
-        if draft_category in category_options:
-            category_index = category_options.index(draft_category)
-        else:
-            category_index = 0
-        category = st.selectbox("一级分类", category_options, index=category_index)
-        sub_category = st.text_input("细分类别", value=draft.get("sub_category", ""))
-        color = st.text_input("颜色", value=draft.get("color", ""))
-        material = st.text_input("材质", value=draft.get("material", ""))
         season_options = ["春", "夏", "秋", "冬"]
-        season_value = draft.get("season", [])
-        if isinstance(season_value, str):
-            season_value = [season_value]
-        season_default = [s for s in season_value if s in season_options]
-        season = st.multiselect("适合季节", season_options, default=season_default)
+        for i, item in enumerate(draft_list):
+            with st.expander(f"👗 识别单品 {i+1}", expanded=True):
+                draft_category = item.get("category")
+                if draft_category in category_options:
+                    category_index = category_options.index(draft_category)
+                else:
+                    category_index = 0
+                category = st.selectbox(
+                    "一级分类",
+                    category_options,
+                    index=category_index,
+                    key=f"category_{i}",
+                )
+                sub_category = st.text_input(
+                    "细分类别",
+                    value=item.get("sub_category", ""),
+                    key=f"sub_category_{i}",
+                )
+                color = st.text_input("颜色", value=item.get("color", ""), key=f"color_{i}")
+                material = st.text_input(
+                    "材质",
+                    value=item.get("material", ""),
+                    key=f"material_{i}",
+                )
+                season_value = item.get("season", [])
+                if isinstance(season_value, str):
+                    season_value = [season_value]
+                season_default = [s for s in season_value if s in season_options]
+                season = st.multiselect(
+                    "适合季节",
+                    season_options,
+                    default=season_default,
+                    key=f"season_{i}",
+                )
 
-        if st.button("✅ 确认加入衣橱"):
-            item_data = {
-                "category": category,
-                "sub_category": sub_category,
-                "color": color,
-                "material": material,
-                "season": season,
-            }
-            service.add_item(item_data)
-            st.session_state["wardrobe_draft"] = None
-            st.success("已加入衣橱")
-            st.rerun()
+                if st.button("✅ 确认加入衣橱", key=f"confirm_{i}"):
+                    item_data = {
+                        "category": category,
+                        "sub_category": sub_category,
+                        "color": color,
+                        "material": material,
+                        "season": season,
+                    }
+                    service.add_item(item_data, image_bytes=uploaded_file.getvalue())
+                    remaining = [d for idx, d in enumerate(draft_list) if idx != i]
+                    st.session_state["wardrobe_draft"] = remaining or None
+                    st.success("已加入衣橱")
+                    st.rerun()
 
     st.markdown("### 我的衣橱")
     items = service.get_all_items()
@@ -504,9 +560,21 @@ with tab_wardrobe:
                 category = item.get("category", "")
                 icon = icon_map.get(category, "👗")
                 title = item.get("sub_category") or category or "未命名"
+
+                # 1. 标题与基础属性（固定高度，保证顶部对齐）
                 st.markdown(f"#### {icon} {title}")
                 st.write(f"颜色：{item.get('color', '未知')}")
                 st.write(f"材质：{item.get('material', '未知')}")
+
+                # 2. 图片气泡弹出框（按钮大小）
+                image_path = item.get("image_path")
+                if image_path and os.path.exists(image_path):
+                    with st.popover("🖼️ 查看图片"):
+                        st.image(image_path, use_container_width=True)
+                else:
+                    st.caption("📸 暂无图片")
+
+                # 3. 删除按钮（底部操作区）
                 if st.button("❌ 移除此单品", key=f"delete_{item.get('id')}"):
                     service.delete_item(item.get("id"))
                     st.rerun()

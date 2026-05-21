@@ -176,12 +176,14 @@ class RagService(object):
         gender: str,
         style: str,
         body: str,
+        city: str,
         current_date: str,
         wardrobe_items: list[dict],
     ) -> list[dict]:
-        weather_info = self._weather_search("未来一周 天气")
+        weather_info = self._weather_search(f"{city} 未来一周 天气")
         available_items = copy.deepcopy(wardrobe_items or [])
-        recent_core_ids: list[str] = []
+        cooldown_tracker = {}  # 记录单品下一次可用的 day_index {item_id: next_available_day}
+        wear_count = {}        # 记录单品洗涤前的已穿次数 {item_id: count}
         results: list[dict] = []
         theme_pool = [
             "轻松通勤感",
@@ -196,7 +198,8 @@ class RagService(object):
         for day_index in range(7):
             theme = theme_pool[day_index % len(theme_pool)]
             today_available = [
-                item for item in available_items if item.get("id") not in recent_core_ids
+                item for item in available_items
+                if cooldown_tracker.get(item.get("id"), -1) <= day_index
             ]
             core_item = today_available[0] if today_available else None
             core_item_name = ""
@@ -208,10 +211,21 @@ class RagService(object):
 
             prompt = (
                 "你是一位专业时尚分析师与私人穿搭主理人，只能输出 JSON。\n"
-                "请基于用户画像、天气与衣橱信息，给出今日穿搭计划。\n"
-                "输出 JSON 结构必须包含：scene, ootd, tips。\n"
-                "scene 为一句场景感知；ootd 为数组，元素是穿搭单品描述，"
-                "必须标注【自有】或【建议购入】并加粗单品名；tips 为一句小贴士。\n\n"
+                "请基于用户画像、天气与衣橱信息，给出今日的【一套完整穿搭】（必须包含上装、下装、鞋履等至少3件单品）。\n"
+                "【极度重要】输出 JSON 必须严格遵守以下格式，绝对不能改变结构：\n"
+                "{\n"
+                '  "scene": "今日场景感知描述",\n'
+                '  "ootd": [\n'
+                '    {"desc": "【自有】**上装名称** + 搭配理由", "id": "必须是下方可用清单中提取的精确id"},\n'
+                '    {"desc": "【自有】**下装名称** + 搭配理由", "id": "必须是下方可用清单中提取的精确id"},\n'
+                '    {"desc": "【自有】**鞋履名称** + 搭配理由", "id": "必须是下方可用清单中提取的精确id"}\n'
+                '  ],\n'
+                '  "tips": "穿搭小贴士"\n'
+                "}\n\n"
+                "【规则约束】\n"
+                "1. ootd 数组中必须是一套完整的搭配，请优先且尽量全部使用【可用衣橱清单】中的单品！\n"
+                "2. 只有当衣橱里实在缺少关键搭配单品时，才允许添加一条带有【建议购入】的项（此时 id 留空）。如果衣橱衣服够穿，绝不许建议购入！\n\n"
+                f"【所在城市】{city}\n"
                 f"【当前日期】{current_date}\n"
                 f"【未来天气】{weather_info}\n"
                 f"【今日风格主题】{theme}\n"
@@ -230,8 +244,31 @@ class RagService(object):
             results.append(day_result)
 
             if core_item and core_item.get("id"):
-                recent_core_ids.append(core_item.get("id"))
-                recent_core_ids = recent_core_ids[-2:]
+                item_id = core_item.get("id")
+                category = core_item.get("category", "")
+
+                # 增加该单品的穿着次数
+                wear_count[item_id] = wear_count.get(item_id, 0) + 1
+
+                # 基于品类的分级冷却策略
+                if category == "内搭":
+                    cooldown_tracker[item_id] = day_index + 3  # 穿1次即洗，冷却2天
+                elif category == "下装":
+                    if wear_count[item_id] >= 2:
+                        cooldown_tracker[item_id] = day_index + 3  # 穿满2次，大洗冷却
+                        wear_count[item_id] = 0  # 洗后重置次数
+                    else:
+                        cooldown_tracker[item_id] = day_index + 2  # 穿1次，强制隔天再穿
+                elif category == "外套":
+                    if wear_count[item_id] >= 3:
+                        cooldown_tracker[item_id] = day_index + 3  # 穿满3次，大洗冷却
+                        wear_count[item_id] = 0
+                    else:
+                        cooldown_tracker[item_id] = day_index + 2  # 穿1次，强制隔天再穿
+                elif category == "鞋履":
+                    cooldown_tracker[item_id] = day_index + 2  # 穿1次静置1天散味
+                else:
+                    cooldown_tracker[item_id] = day_index + 1  # 配饰等无冷却，明天可继续用
 
         return results
 
