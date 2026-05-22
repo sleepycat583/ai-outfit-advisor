@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import time
 import datetime
@@ -21,6 +22,39 @@ def typewriter_stream(stream, delay: float = 0.02):
         for char in text:
             yield char
             time.sleep(delay)
+
+
+def render_message_with_columns(text, w_items):
+    """按行渲染文本：含 <item>ID</item> 的行使用 st.columns + st.popover 展示图片。"""
+    item_map = {item.get("id"): item for item in w_items}
+    lines = text.split("\n")
+
+    for line in lines:
+        item_ids = re.findall(r"<item>(.*?)</item>", line)
+        if not item_ids:
+            st.markdown(line)
+            continue
+
+        clean_line = re.sub(r"<item>.*?</item>", "", line).strip()
+        valid_ids = [iid for iid in item_ids if iid in item_map]
+        if not valid_ids:
+            st.markdown(line)
+            continue
+
+        col_ratios = [5] + [1] * len(valid_ids)
+        cols = st.columns(col_ratios)
+        with cols[0]:
+            st.markdown(clean_line)
+
+        for idx, item_id in enumerate(valid_ids):
+            item = item_map[item_id]
+            image_path = item.get("image_path", "")
+            name = item.get("sub_category") or item.get("category") or "单品"
+            with cols[idx + 1]:
+                if image_path and os.path.exists(image_path):
+                    with st.popover("🖼️ 查看"):
+                        st.image(image_path, width=250)
+                        st.caption(name)
 
 
 class HumanizedStatusHandler(BaseCallbackHandler):
@@ -434,14 +468,20 @@ with tab_chat:
                             st.markdown(f"- {desc}")
                         with col_btn:
                             if item_id and item_id in wardrobe_dict:
-                                img_path = wardrobe_dict[item_id].get("image_path")
+                                w_item = wardrobe_dict[item_id]
+                                img_path = w_item.get("image_path")
                                 if img_path and os.path.exists(img_path):
                                     with st.popover("🖼️ 查看"):
-                                        st.image(img_path, use_container_width=True)
+                                        st.image(img_path, width=250)
+                                        st.caption(f"颜色：{w_item.get('color', '未知')} | 材质：{w_item.get('material', '未知')}")
                 st.markdown(f"**小贴士：**{day_plan.get('tips', '')}")
 
     for message in st.session_state["message"]:
-        st.chat_message(message["role"]).write(message["content"])
+        if message["role"] == "assistant":
+            with st.chat_message(message["role"]):
+                render_message_with_columns(message["content"], wardrobe_items)
+        else:
+            st.chat_message(message["role"]).write(message["content"])
 
     # --- 新增：快捷提问按钮 ---
     preset_prompt = None
@@ -506,7 +546,11 @@ with tab_chat:
                     res = FALLBACK_MESSAGE
                     status.update(label="⚠️ 小衣思考超时，请稍后再试", state="error", expanded=False)
 
-            st.write_stream(typewriter_stream([res]))
+            placeholder = st.empty()
+            clean_res = re.sub(r"<item>.*?</item>", "", res)
+            placeholder.write_stream(typewriter_stream([clean_res]))
+            placeholder.empty()
+            render_message_with_columns(res, wardrobe_items)
         st.session_state["message"].append({"role": "assistant", "content": res})
 
 with tab_wardrobe:
@@ -729,6 +773,10 @@ with tab_wardrobe:
                     st.image(image_path, use_container_width=True)
                 else:
                     st.info("暂无照片")
+                new_image = st.file_uploader(
+                    "📷 补充/更换照片", type=["jpg", "jpeg", "png", "webp"],
+                    key=f"{prefix}_img_upload",
+                )
 
             with col_form:
                 category_options = config.WARDROBE_CATEGORIES
@@ -750,12 +798,23 @@ with tab_wardrobe:
             col_save, col_cancel = st.columns(2)
             with col_save:
                 if st.button("💾 保存修改", key=f"{prefix}_save", use_container_width=True):
-                    svc.update_item(item_id, {
+                    update_data = {
                         "category": new_category,
                         "sub_category": new_sub,
                         "color": new_color,
                         "material": new_material,
-                    })
+                    }
+                    if new_image is not None:
+                        image_bytes = new_image.getvalue()
+                        existing_path = item.get("image_path", "")
+                        if existing_path and os.path.isdir(os.path.dirname(existing_path)):
+                            save_path = existing_path
+                        else:
+                            save_path = os.path.join(svc.image_dir, f"{item_id}.jpg")
+                        with open(save_path, "wb") as f:
+                            f.write(image_bytes)
+                        update_data["image_path"] = save_path
+                    svc.update_item(item_id, update_data)
                     st.session_state.editing_item_id = None
                     st.toast("单品信息已更新！✨", icon="✅")
                     time.sleep(0.3)
@@ -775,9 +834,9 @@ with tab_wardrobe:
             st.write(f"材质：{item.get('material', '未知')}")
             image_path = item.get("image_path")
             if image_path and os.path.exists(image_path):
-                st.caption("📸 已有照片")
+                st.markdown("📸 :green[**已有照片**]")
             else:
-                st.caption("📸 暂无图片")
+                st.caption("🌫️ 暂无图片")
             col_view, col_del = st.columns(2)
             with col_view:
                 if st.button("✏️ 查看/编辑", key=f"view_{item.get('id')}_{unique_idx}", use_container_width=True):
