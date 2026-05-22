@@ -1,3 +1,4 @@
+import base64
 import os
 import re
 import uuid
@@ -24,37 +25,67 @@ def typewriter_stream(stream, delay: float = 0.02):
             time.sleep(delay)
 
 
-def render_message_with_columns(text, w_items):
-    """按行渲染文本：含 <item>ID</item> 的行使用 st.columns + st.popover 展示图片。"""
+def get_image_base64(image_path):
+    """读取本地图片文件并转换为 Base64 字符串。"""
+    with open(image_path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+
+def build_item_flex_card(item, img_b64):
+    """生成单品微缩卡片的 HTML 字符串（左图右文 Flexbox）。"""
+    import html as _html
+
+    name = _html.escape(item.get("sub_category") or item.get("category") or "单品")
+    color = _html.escape(item.get("color", "未知"))
+    material = _html.escape(item.get("material", "未知"))
+    return f"""<div style="display: inline-flex; align-items: center; background: rgba(163, 177, 155, 0.08); padding: 8px 12px; border-radius: 10px; border: 1px solid rgba(163, 177, 155, 0.3); margin: 6px 8px 6px 0; gap: 14px;">
+    <div style="background: #ffffff; border-radius: 6px; padding: 3px; box-shadow: 0 2px 5px rgba(0,0,0,0.06); display: flex; align-items: center; justify-content: center; height: 116px; min-width: 80px;">
+        <img src="data:image/jpeg;base64,{img_b64}" style="height: 110px; width: auto; max-width: 90px; object-fit: contain; border-radius: 4px;">
+    </div>
+    <div style="display: flex; flex-direction: column; justify-content: center; min-width: 120px;">
+        <span style="font-weight: bold; font-size: 15px; color: var(--text-primary); margin-bottom: 6px;">{name}</span>
+        <span style="font-size: 12px; color: #777; background: rgba(0,0,0,0.04); padding: 2px 6px; border-radius: 4px; display: inline-block; width: fit-content;">🎨 {color}</span>
+        <span style="font-size: 12px; color: #777; background: rgba(0,0,0,0.04); padding: 2px 6px; border-radius: 4px; display: inline-block; width: fit-content; margin-top: 4px;">🧵 {material}</span>
+    </div>
+</div>"""
+
+
+def render_recommendations(item_ids, w_items):
+    """在文字下方以网格形式渲染推荐单品列表。"""
     item_map = {item.get("id"): item for item in w_items}
-    lines = text.split("\n")
-
-    for line in lines:
-        item_ids = re.findall(r"<item>(.*?)</item>", line)
-        if not item_ids:
-            st.markdown(line)
+    valid_items = []
+    for iid in item_ids:
+        item = item_map.get(iid)
+        if not item:
             continue
-
-        clean_line = re.sub(r"<item>.*?</item>", "", line).strip()
-        valid_ids = [iid for iid in item_ids if iid in item_map]
-        if not valid_ids:
-            st.markdown(line)
+        image_path = item.get("image_path", "")
+        if not image_path or not os.path.exists(image_path):
             continue
+        img_b64 = get_image_base64(image_path)
+        valid_items.append((item, img_b64))
 
-        col_ratios = [5] + [1] * len(valid_ids)
-        cols = st.columns(col_ratios)
-        with cols[0]:
-            st.markdown(clean_line)
+    if not valid_items:
+        return
 
-        for idx, item_id in enumerate(valid_ids):
-            item = item_map[item_id]
-            image_path = item.get("image_path", "")
-            name = item.get("sub_category") or item.get("category") or "单品"
-            with cols[idx + 1]:
-                if image_path and os.path.exists(image_path):
-                    with st.popover("🖼️ 查看"):
-                        st.image(image_path, width=250)
-                        st.caption(name)
+    with st.container(border=True):
+        st.markdown("##### ✨ 推荐单品")
+        cols_per_row = 3
+        for row_start in range(0, len(valid_items), cols_per_row):
+            row_items = valid_items[row_start:row_start + cols_per_row]
+            cols = st.columns(cols_per_row)
+            for col, (item, img_b64) in zip(cols, row_items):
+                with col:
+                    card_html = build_item_flex_card(item, img_b64)
+                    st.markdown(card_html, unsafe_allow_html=True)
+
+
+def render_message(text, w_items):
+    """渲染完整消息：先渲染纯净文字，再在下方展示推荐单品网格。"""
+    item_ids = re.findall(r"<item>(.*?)</item>", text)
+    clean_text = re.sub(r"<item>.*?</item>", "", text).strip()
+    st.markdown(clean_text)
+    if item_ids:
+        render_recommendations(item_ids, w_items)
 
 
 class HumanizedStatusHandler(BaseCallbackHandler):
@@ -463,23 +494,23 @@ with tab_chat:
                     else:
                         desc = item.get("desc", "")
                         item_id = item.get("id", "")
-                        col_text, col_btn = st.columns([5, 1])
-                        with col_text:
+                        if item_id and item_id in wardrobe_dict:
+                            w_item = wardrobe_dict[item_id]
+                            img_path = w_item.get("image_path")
+                            if img_path and os.path.exists(img_path):
+                                img_b64 = get_image_base64(img_path)
+                                card_html = build_item_flex_card(w_item, img_b64)
+                                st.markdown(f"- {desc}<br>{card_html}", unsafe_allow_html=True)
+                            else:
+                                st.markdown(f"- {desc}")
+                        else:
                             st.markdown(f"- {desc}")
-                        with col_btn:
-                            if item_id and item_id in wardrobe_dict:
-                                w_item = wardrobe_dict[item_id]
-                                img_path = w_item.get("image_path")
-                                if img_path and os.path.exists(img_path):
-                                    with st.popover("🖼️ 查看"):
-                                        st.image(img_path, width=250)
-                                        st.caption(f"颜色：{w_item.get('color', '未知')} | 材质：{w_item.get('material', '未知')}")
                 st.markdown(f"**小贴士：**{day_plan.get('tips', '')}")
 
     for message in st.session_state["message"]:
         if message["role"] == "assistant":
             with st.chat_message(message["role"]):
-                render_message_with_columns(message["content"], wardrobe_items)
+                render_message(message["content"], wardrobe_items)
         else:
             st.chat_message(message["role"]).write(message["content"])
 
@@ -550,7 +581,7 @@ with tab_chat:
             clean_res = re.sub(r"<item>.*?</item>", "", res)
             placeholder.write_stream(typewriter_stream([clean_res]))
             placeholder.empty()
-            render_message_with_columns(res, wardrobe_items)
+            render_message(res, wardrobe_items)
         st.session_state["message"].append({"role": "assistant", "content": res})
 
 with tab_wardrobe:
