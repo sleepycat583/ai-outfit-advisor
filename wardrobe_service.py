@@ -1,80 +1,79 @@
 import base64
-import contextlib
 import io
 import json
 import os
 import re
-import time
+import sqlite3
 import uuid
 from datetime import datetime
+from typing import Optional, TYPE_CHECKING
 
 from PIL import Image
 
 import config_data as config
 import dashscope
+from prompts import VLM_ANALYZE_PROMPT
 
-if os.name == "nt":
-    import msvcrt
-else:
-    import fcntl
+if TYPE_CHECKING:
+    from vector_store_service import VectorWardrobeService
 
 
-@contextlib.contextmanager
-def _file_lock(lock_path: str, retry_delay: float = 0.05):
-    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
-    with open(lock_path, "a+", encoding="utf-8") as lock_file:
-        while True:
-            try:
-                if os.name == "nt":
-                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
-                else:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                break
-            except OSError:
-                time.sleep(retry_delay)
-        try:
-            yield
-        finally:
-            if os.name == "nt":
-                lock_file.seek(0)
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+def _season_to_str(season) -> str:
+    if isinstance(season, list):
+        return ",".join(season)
+    return str(season) if season else ""
+
+
+def _season_to_list(season_str: str) -> list[str]:
+    if not season_str:
+        return []
+    return [s.strip() for s in season_str.split(",") if s.strip()]
+
+
+def _row_to_dict(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    d["season"] = _season_to_list(d.get("season", ""))
+    return d
+
+
+def _item_to_text(item: dict) -> str:
+    item_id = item.get("id", "")
+    category = item.get("category", "")
+    sub_category = item.get("sub_category", "")
+    color = item.get("color", "")
+    material = item.get("material", "")
+    season = _season_to_str(item.get("season", []))
+    return f"- id:{item_id} 类别:{category}/{sub_category} 颜色:{color} 材质:{material} 适季:{season}"
 
 
 class WardrobeService:
-    def __init__(self, file_path: str | None = None) -> None:
-        self.file_path = file_path or config.WARDROBE_FILE_PATH
-        os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
+    def __init__(
+        self,
+        db_path: str | None = None,
+        vector_wardrobe: Optional["VectorWardrobeService"] = None,
+    ) -> None:
+        self.db_path = db_path or "./data/wardrobe.db"
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self.image_dir = config.WARDROBE_IMAGE_DIR
         os.makedirs(self.image_dir, exist_ok=True)
+        self.vector_wardrobe = vector_wardrobe
+        self._init_db()
 
-    def _read_items_unlocked(self) -> list[dict]:
-        if not os.path.exists(self.file_path):
-            return []
-        if os.path.getsize(self.file_path) == 0:
-            return []
-        with open(self.file_path, "r", encoding="utf-8") as f:
-            items = json.load(f)
-        # 兜底去重：按 id 去重，保留首次出现的条目
-        seen = set()
-        deduped = []
-        for item in items:
-            iid = item.get("id")
-            if iid and iid in seen:
-                continue
-            if iid:
-                seen.add(iid)
-            deduped.append(item)
-        return deduped
-
-    def _atomic_write(self, data: list[dict]) -> None:
-        temp_path = f"{self.file_path}.tmp"
-        with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(temp_path, self.file_path)
+    def _init_db(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS wardrobe_items (
+                    id TEXT PRIMARY KEY,
+                    category TEXT NOT NULL,
+                    sub_category TEXT DEFAULT '',
+                    color TEXT DEFAULT '',
+                    material TEXT DEFAULT '',
+                    season TEXT DEFAULT '',
+                    image_path TEXT DEFAULT '',
+                    created_at TEXT DEFAULT ''
+                )
+            """)
+            conn.commit()
 
     def preprocess_image(self, image_bytes: bytes) -> str:
         image = Image.open(io.BytesIO(image_bytes))
@@ -95,15 +94,7 @@ class WardrobeService:
 
     def analyze_clothing_image(self, image_bytes: bytes) -> list[dict]:
         image_b64 = self.preprocess_image(image_bytes)
-        system_prompt = (
-            "你是一位专业时尚分析师，只能输出 JSON。"
-            "请识别图片中所有可见的服饰单品（例如上衣、裤子、鞋子等），并以 JSON 数组的形式返回。"
-            "每个单品必须包含字段：category、sub_category、color、material、season。"
-            "category 必须是以下之一：['外套', '内搭', '下装', '鞋履', '配饰']。"
-            "season 为数组，元素只能是 春/夏/秋/冬。"
-            '示例：[{"category": "内搭", "sub_category": "衬衫", "color": "蓝色", "material": "棉", "season": ["春", "秋"]}, '
-            '{"category": "下装", "sub_category": "休闲裤", "color": "黑色", "material": "聚酯纤维", "season": ["春", "夏", "秋"]}]'
-        )
+        system_prompt = VLM_ANALYZE_PROMPT
         messages = [
             {"role": "system", "content": [{"text": system_prompt}]},
             {
@@ -167,45 +158,97 @@ class WardrobeService:
 
         return normalized
 
-    def get_all_items(self) -> list:
-        lock_path = f"{self.file_path}.lock"
-        with _file_lock(lock_path):
-            return self._read_items_unlocked()
+    def get_all_items(self) -> list[dict]:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT * FROM wardrobe_items ORDER BY created_at DESC").fetchall()
+            return [_row_to_dict(r) for r in rows]
 
     def add_item(self, item_data: dict, image_bytes: bytes = None) -> dict:
-        lock_path = f"{self.file_path}.lock"
-        with _file_lock(lock_path):
-            items = self._read_items_unlocked()
-            new_item = dict(item_data)
-            new_item["id"] = str(uuid.uuid4())
-            if image_bytes:
-                image_path = os.path.join(self.image_dir, f"{new_item['id']}.jpg")
-                with open(image_path, "wb") as f:
-                    f.write(image_bytes)
-                new_item["image_path"] = image_path
-            new_item["created_at"] = datetime.now().isoformat(timespec="seconds")
-            items.append(new_item)
-            self._atomic_write(items)
-            return new_item
+        new_id = str(uuid.uuid4())
+        image_path = ""
+        if image_bytes:
+            image_path = os.path.join(self.image_dir, f"{new_id}.jpg")
+            with open(image_path, "wb") as f:
+                f.write(image_bytes)
+        created_at = datetime.now().isoformat(timespec="seconds")
+        season_str = _season_to_str(item_data.get("season", []))
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """INSERT INTO wardrobe_items (id, category, sub_category, color, material, season, image_path, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    new_id,
+                    item_data.get("category", ""),
+                    item_data.get("sub_category", ""),
+                    item_data.get("color", ""),
+                    item_data.get("material", ""),
+                    season_str,
+                    image_path,
+                    created_at,
+                ),
+            )
+            conn.commit()
+
+        new_item = {
+            "id": new_id,
+            "category": item_data.get("category", ""),
+            "sub_category": item_data.get("sub_category", ""),
+            "color": item_data.get("color", ""),
+            "material": item_data.get("material", ""),
+            "season": item_data.get("season", []),
+            "image_path": image_path,
+            "created_at": created_at,
+        }
+
+        if self.vector_wardrobe:
+            self.vector_wardrobe.add_items([(new_id, _item_to_text(new_item))])
+
+        return new_item
 
     def update_item(self, item_id: str, new_data: dict) -> dict | None:
         """更新指定 ID 的单品数据，返回更新后的 dict 或 None。"""
-        lock_path = f"{self.file_path}.lock"
-        with _file_lock(lock_path):
-            items = self._read_items_unlocked()
-            for item in items:
-                if item.get("id") == item_id:
-                    item.update(new_data)
-                    self._atomic_write(items)
-                    return item
-        return None
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            existing = conn.execute(
+                "SELECT * FROM wardrobe_items WHERE id = ?", (item_id,)
+            ).fetchone()
+            if existing is None:
+                return None
+
+            updates = {}
+            for field in ["category", "sub_category", "color", "material", "image_path"]:
+                if field in new_data:
+                    updates[field] = new_data[field]
+            if "season" in new_data:
+                updates["season"] = _season_to_str(new_data["season"])
+
+            if updates:
+                set_clause = ", ".join(f"{k} = ?" for k in updates)
+                values = list(updates.values()) + [item_id]
+                conn.execute(
+                    f"UPDATE wardrobe_items SET {set_clause} WHERE id = ?", values
+                )
+                conn.commit()
+
+            row = conn.execute(
+                "SELECT * FROM wardrobe_items WHERE id = ?", (item_id,)
+            ).fetchone()
+            updated_item = _row_to_dict(row)
+
+        if self.vector_wardrobe:
+            self.vector_wardrobe.update_items([(item_id, _item_to_text(updated_item))])
+
+        return updated_item
 
     def delete_item(self, item_id: str) -> None:
-        lock_path = f"{self.file_path}.lock"
-        with _file_lock(lock_path):
-            items = self._read_items_unlocked()
-            filtered_items = [item for item in items if item.get("id") != item_id]
-            self._atomic_write(filtered_items)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM wardrobe_items WHERE id = ?", (item_id,))
+            conn.commit()
+
+        if self.vector_wardrobe:
+            self.vector_wardrobe.delete_items([item_id])
 
     def export_to_csv(self) -> str:
         """将衣橱数据导出为 CSV 字符串。"""
@@ -232,14 +275,19 @@ class WardrobeService:
             raise ValueError("CSV 缺少必要字段 'category'")
 
         new_items = []
+        seen_ids = set()
         for row in reader:
             cat = (row.get("category") or "").strip()
             if not cat:
                 continue
+            item_id = (row.get("id") or str(uuid.uuid4())).strip()
+            if item_id in seen_ids:
+                continue
+            seen_ids.add(item_id)
             season_raw = (row.get("season") or "").strip()
             season_list = [s.strip() for s in season_raw.split("|") if s.strip()] if season_raw else []
             new_items.append({
-                "id": (row.get("id") or str(uuid.uuid4())).strip(),
+                "id": item_id,
                 "category": cat,
                 "sub_category": (row.get("sub_category") or "").strip(),
                 "color": (row.get("color") or "").strip(),
@@ -251,28 +299,56 @@ class WardrobeService:
         if not new_items:
             return 0
 
-        # CSV 内部去重（同 ID 只保留第一条）
-        seen_ids = set()
-        deduped = []
-        for item in new_items:
-            iid = item["id"]
-            if iid in seen_ids:
-                continue
-            seen_ids.add(iid)
-            deduped.append(item)
-        new_items = deduped
-
-        lock_path = f"{self.file_path}.lock"
-        with _file_lock(lock_path):
+        with sqlite3.connect(self.db_path) as conn:
             if mode == "replace":
-                self._atomic_write(new_items)
-                return len(new_items)
+                conn.execute("DELETE FROM wardrobe_items")
+                conn.executemany(
+                    """INSERT INTO wardrobe_items (id, category, sub_category, color, material, season, image_path, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, '', ?)""",
+                    [
+                        (
+                            item["id"],
+                            item["category"],
+                            item["sub_category"],
+                            item["color"],
+                            item["material"],
+                            _season_to_str(item["season"]),
+                            item["created_at"],
+                        )
+                        for item in new_items
+                    ],
+                )
+                conn.commit()
+                count = len(new_items)
             else:
-                items = self._read_items_unlocked()
-                existing_ids = {item.get("id") for item in items}
+                existing_ids = {
+                    row[0]
+                    for row in conn.execute("SELECT id FROM wardrobe_items").fetchall()
+                }
                 truly_new = [item for item in new_items if item["id"] not in existing_ids]
                 if not truly_new:
                     return 0
-                items.extend(truly_new)
-                self._atomic_write(items)
-                return len(truly_new)
+                conn.executemany(
+                    """INSERT INTO wardrobe_items (id, category, sub_category, color, material, season, image_path, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, '', ?)""",
+                    [
+                        (
+                            item["id"],
+                            item["category"],
+                            item["sub_category"],
+                            item["color"],
+                            item["material"],
+                            _season_to_str(item["season"]),
+                            item["created_at"],
+                        )
+                        for item in truly_new
+                    ],
+                )
+                conn.commit()
+                count = len(truly_new)
+
+        if self.vector_wardrobe and count > 0:
+            sync_items = [(item["id"], _item_to_text(item)) for item in new_items]
+            self.vector_wardrobe.update_items(sync_items)
+
+        return count

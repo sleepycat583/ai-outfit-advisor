@@ -7,7 +7,9 @@ import datetime
 import streamlit as st
 import config_data as config
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_community.embeddings import DashScopeEmbeddings
 from rag import RagService, ConsoleLoggingHandler, FALLBACK_MESSAGE
+from vector_store_service import VectorWardrobeService
 from wardrobe_service import WardrobeService
 
 # 强制指定阿里云 DashScope 接口不走本地代理，解决 ProxyError
@@ -382,8 +384,14 @@ st.markdown(header_html, unsafe_allow_html=True)
 if "message" not in st.session_state:
     st.session_state["message"] = [{"role": "assistant", "content": "你好，有什么可以帮助你？"}]
 
+if "vector_wardrobe" not in st.session_state:
+    embedding = DashScopeEmbeddings(model=config.EMBEDDING_MODEL_NAME)
+    st.session_state["vector_wardrobe"] = VectorWardrobeService(embedding)
+
 if "rag" not in st.session_state:
-    st.session_state["rag"] = RagService()
+    st.session_state["rag"] = RagService(
+        vector_wardrobe=st.session_state["vector_wardrobe"]
+    )
 
 if "session_id" not in st.session_state:
     st.session_state["session_id"] = uuid.uuid4().hex
@@ -431,7 +439,7 @@ with st.sidebar:
 tab_chat, tab_wardrobe = st.tabs(["💬 穿搭顾问", "👗 智能衣橱"])
 
 with tab_chat:
-    wardrobe_service = WardrobeService()
+    wardrobe_service = WardrobeService(vector_wardrobe=st.session_state["vector_wardrobe"])
     wardrobe_items = wardrobe_service.get_all_items()
 
     st.markdown("#### 📅 本周穿搭计划")
@@ -586,7 +594,7 @@ with tab_chat:
 
 with tab_wardrobe:
     st.subheader("👗 智能衣橱")
-    service = WardrobeService()
+    service = WardrobeService(vector_wardrobe=st.session_state["vector_wardrobe"])
     category_options = config.WARDROBE_CATEGORIES
     season_options = ["春", "夏", "秋", "冬"]
 

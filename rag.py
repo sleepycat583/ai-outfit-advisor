@@ -1,4 +1,5 @@
 from typing import Optional
+
 import datetime
 import copy
 import json
@@ -10,7 +11,8 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage
 from langchain_core.tools import Tool
 from history import FileChatMessageHistory
-from vector_store_service import VectorStoreService
+from vector_store_service import VectorStoreService, VectorWardrobeService
+from prompts import RAG_SYSTEM_PROMPT, WEEKLY_PLAN_PROMPT
 from langchain_community.embeddings import DashScopeEmbeddings
 import config_data as config
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -90,64 +92,20 @@ class ConsoleLoggingHandler(BaseCallbackHandler):
 
     def on_agent_finish(self, finish, **kwargs):
         print("✅ [回答完成] 穿搭建议已生成", flush=True)
-        print("-"*40, flush=True)
+        print("-" * 40, flush=True)
 
 
 class RagService(object):
-    def __init__(self):
+    def __init__(self, vector_wardrobe: Optional[VectorWardrobeService] = None):
+        self.vector_wardrobe = vector_wardrobe
+
         self.vector_service = VectorStoreService(
             embedding=DashScopeEmbeddings(model=config.EMBEDDING_MODEL_NAME)
         )
 
         self.prompt_template = ChatPromptTemplate.from_messages(
             [
-                ("system", """你是一位名叫"小衣"的顶尖私人穿搭主理人兼时尚博主。
-你拥有极高的美学素养，不仅精通服装搭配，还能精准把握天气与流行趋势。
-
-【当前日期】
-{current_date}
-今天是 {current_date}，只参考最新的天气信息。
-
-【当前客户绝密档案】
-- 性别：{gender}
-- 偏好风格：{style}
-- 身高体重/体型：{body}
-- 所在城市：{city}
-
-【用户数字衣橱（以下是你拥有的真实单品，必须优先使用）】
-{wardrobe}
-
-⚠️ 【穿搭推荐铁律 - 衣橱优先（最高优先级，违反视为无效推荐）】：
-1. 衣橱优先：你必须【优先且尽量多地】使用上方衣橱中已有的单品来完成搭配！
-2. 标签明确：使用衣橱里的真实单品时，【必须】在单品名称前加上【自有】标签，并带上该单品的颜色、材质。例如："【自有】深蓝色百褶裙"。
-3. 补充建议：只有当衣橱里的衣服实在无法凑齐一套合适的搭配时，才可以推荐外部单品，并【必须】加上【建议购入】标签。
-4. 比例约束：回答中【自有】单品的数量必须多于【建议购入】单品的数量。如果衣橱够用，绝不许建议购入！
-
-【主理人服务法则（必须严格遵守）】
-1. 👑 语气基调：温暖、自信、充满活力，像个懂客户的时尚圈知心好友。严禁使用机械化、AI味浓重的公文套话。
-2. 🎨 排版美学：回答必须极具结构感和呼吸感，必须包含以下三个板块：
-   - ⛅ 【场景与温度感知】：用一句亲切的话破冰，点评当前天气或客户提到的特定场景（如面试、约会）。必须参考用户所在城市的实际天气。
-   - ✨ 【主理人 OOTD 灵感】：分点给出具体的穿搭推荐。核心单品必须使用 **加粗**（例如：**藏青色阔腿裤**）。必须结合用户的身高体重和偏好风格。排版格式如下：
-     · 上装：【自有】白色纯棉短袖T恤，清爽透气。
-     · 下装：【自有】黑色直筒西裤，修饰腿型、拉长比例。
-     · 鞋履：【建议购入】一双米色乐福鞋，提升整体精致度。
-   - 💡 【小衣私藏贴士】：结合客户档案（如身高体重）或洗护要求，给出一个专业的"扬长避短"或"避坑"建议。
-3. 🎀 视觉点缀：灵活、克制地使用高级感表情包（如 ✨🧥👗👟🍂），不要满屏都是，起到点睛之笔即可。
-4. 💎 专属签名：无论客户问什么，你的回答最后必须单独换行，并固定加上这句专属问候语：
-   "怎么样，这套搭配还合你的心意吗？还有什么场景需要我帮你参谋参谋？👗✨"
-5. 🏷️ 单品标签：推荐衣橱中已有的单品时，必须在单品描述的同一行末尾，隐式附上该单品的唯一ID标签，格式为 <item>单品的唯一id</item>。此标签仅供程序解析使用，不影响客户阅读。
-   例如：· 上装：【自有】白色纯棉短袖T恤，清爽透气。 <item>a1b2c3d4-...</item>
-
-【工具使用底线】
-- 你具备自主查阅网络天气、流行趋势以及本地穿搭知识库的能力。
-
-⚠️ 天气查询强制约束（最高优先级，违反将导致推荐无效）：
-- 查询天气前，【必须】先从上方客户档案中提取【所在城市】作为查询目标。
-- 你只能查询档案中指定的城市天气（如档案中写"武陟"，则只能查"武陟 天气"）。
-- 【绝对禁止】查询"全国天气"、"全国"、"中国"或任何不包含具体城市名的模糊区域天气。
-- 结合【当前日期】，按需附加"今天"、"明天"或"未来一周"等时间限定词。
-
-- 严禁向客户暴露你在使用"搜索工具"或"检索知识库"，请将查到的信息无缝、自然地融进你的时尚建议中。"""),
+                ("system", RAG_SYSTEM_PROMPT),
                 ("system", "以下是你们的历史对话记录："),
                 MessagesPlaceholder(variable_name="history"),
                 ("user", "{input}"),
@@ -166,17 +124,31 @@ class RagService(object):
         updated_inputs["current_date"] = datetime.datetime.now().strftime("%Y年%m月%d日")
         return updated_inputs
 
+    def _prepare_inputs(self, inputs: dict) -> dict:
+        """预处理输入：注入当前日期，并通过向量检索压缩衣橱文本。"""
+        inputs = self._with_current_date(inputs)
+        if self.vector_wardrobe:
+            query = inputs.get("input", "")
+            wardrobe_text = inputs.get("wardrobe", "")
+            if query and wardrobe_text:
+                top_texts = self.vector_wardrobe.search(query, k=15)
+                if top_texts:
+                    inputs["wardrobe"] = "\n".join(top_texts)
+        return inputs
+
     def stream(self, inputs: dict, config: Optional[dict] = None):
         try:
-            return self.chain.stream(self._with_current_date(inputs), config=config)
+            return self.chain.stream(self._prepare_inputs(inputs), config=config)
         except Exception:
+
             def _fallback():
                 yield FALLBACK_MESSAGE
+
             return _fallback()
 
     def invoke(self, inputs: dict, config: Optional[dict] = None):
         try:
-            return self.chain.invoke(self._with_current_date(inputs), config=config)
+            return self.chain.invoke(self._prepare_inputs(inputs), config=config)
         except Exception:
             return FALLBACK_MESSAGE
 
@@ -251,41 +223,26 @@ class RagService(object):
             day_labels.append(f"{d.strftime('%m月%d日')} {weekdays[d.weekday()]}")
 
         theme_pool = [
-            "轻松通勤感", "温柔日常感", "活力运动感", "简约高级感",
-            "甜酷混搭感", "松弛休闲感", "精致约会感",
+            "轻松通勤感",
+            "温柔日常感",
+            "活力运动感",
+            "简约高级感",
+            "甜酷混搭感",
+            "松弛休闲感",
+            "精致约会感",
         ]
 
         # Step 2: 构建全局规划 Prompt
-        theme_lines = "\n".join(
-            f"· {day_labels[i]}  →  {theme_pool[i]}" for i in range(7)
+        theme_lines = "\n".join(f"· {day_labels[i]}  →  {theme_pool[i]}" for i in range(7))
+        prompt = WEEKLY_PLAN_PROMPT.format(
+            gender=gender,
+            style=style,
+            body=body,
+            city=city,
+            weather_info=weather_info,
+            theme_lines=theme_lines,
+            wardrobe_text=wardrobe_text,
         )
-        prompt = f"""你是一位顶级私人穿搭主理人。请为用户规划未来连续7天的完整穿搭方案。
-
-【用户画像硬约束（每套搭配必须体现以下特征，违反即视为无效规划）】
-- 性别：{gender}（所有推荐必须符合该性别的着装习惯）
-- 偏好风格：{style}（7天的搭配均需围绕此风格展开，不可偏离为其他风格）
-- 身高体重/体型：{body}（每套搭配必须针对此体型做扬长避短的设计，例如矮个子避免长款、丰满体型善用纵向线条等）
-- 所在城市：{city}（天气查询和场景感知均以此城市为准，不得使用其他城市）
-在每套搭配的 scene、desc 和 tips 中，必须能明确看出上述画像数据的影响，不能只泛泛而谈。
-
-【未来天气参考】
-{weather_info}
-
-【7天日期与指定风格主题】
-{theme_lines}
-
-【可用衣橱单品清单】
-{wardrobe_text}
-
-【穿搭轮换铁律（必须严格遵守）】
-1. 内搭类（T恤/衬衫/打底衫等贴身衣物）：每件7天内最多出现1次（穿过即洗）。
-2. 下装类（裤子/裙子）：每件最多出现2次，且同件不可连续两天穿着。
-3. 外套类：每件最多出现3次，尽量隔天轮换。
-4. 鞋履类：每双最多出现2次，隔天轮换以保持鞋型。
-5. 配饰类：适度更换即可，无严格次数限制。
-6. 每天必须是一套完整搭配（≥3件：上装+下装+鞋履）。
-7. 优先衣橱现有单品（标记【自有】），仅确实缺少关键单品时才建议购入（标记【建议购入】、id留空）。
-8. 7天风格需各有侧重，在指定主题下发挥，避免每天雷同。"""
 
         # Step 3: 结构化输出（优先 with_structured_output，失败回退 JSON 模式）
         if status_container:
@@ -343,7 +300,7 @@ class RagService(object):
         retriever_tool = create_retriever_tool(
             retriever,
             "knowledge_base_search",
-            "当用户询问关于服装洗涤、尺码推荐、颜色搭配等通用穿搭知识时，必须使用此工具。"
+            "当用户询问关于服装洗涤、尺码推荐、颜色搭配等通用穿搭知识时，必须使用此工具。",
         )
         tools = [search_tool, retriever_tool]
 
@@ -373,7 +330,7 @@ class RagService(object):
         return chain
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     session_config = {
         "configurable": {
             "session_id": "user_001",
@@ -387,6 +344,6 @@ if __name__ == '__main__':
             "body": "",
             "current_date": "2026年05月20日",
         },
-        session_config
+        session_config,
     )
     print(res)
