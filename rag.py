@@ -18,8 +18,8 @@ import config_data as config
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_community.chat_models.tongyi import ChatTongyi
 from langchain_community.tools import DuckDuckGoSearchRun
-from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
-from langchain_classic.tools.retriever import create_retriever_tool
+from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain.tools.retriever import create_retriever_tool
 
 
 class OOTDItem(BaseModel):
