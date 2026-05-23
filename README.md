@@ -1,10 +1,9 @@
-# 👔 AI Outfit Advisor (智能穿搭顾问)
+👔 AI Outfit Advisor (智能穿搭顾问)
 
 V2.2 - 基于多模态大模型 + 状态过滤算法的“智能衣橱”与“7天不重样”个性化穿搭推荐系统
 
 一个面向大学生群体的智能穿搭决策与衣橱管理助手。融合 Qwen-Max 大模型、多模态视觉大模型 (Qwen-VL)、RAG 本地知识库 (Chroma) 与 Agent 联网决策 (DuckDuckGo)，以“顶尖私人穿搭主理人”人设，提供图片识衣、数字衣橱管理、闲置盘活，以及基于天气的 7 天不重样周计划的完整 OOTD 解决方案。
 
----
 ✨ 核心亮点
 
 引擎/模块
@@ -13,34 +12,30 @@ V2.2 - 基于多模态大模型 + 状态过滤算法的“智能衣橱”与“7
 
 🧠 Agent 联网决策
 
-自主调用 DuckDuckGo 实时搜索天气、流行趋势，结合 LangChain 全生命周期 Callback 系统实现终端透明日志
+自主调用 DuckDuckGo 实时搜索天气、流行趋势，结合 LangChain 全生命周期 Callback 系统实现终端透明日志。
 
 📚 RAG 本地知识库
 
-基于 Chroma 向量数据库，覆盖洗护养护、尺码推荐、颜色搭配三大领域，支持 .txt 文档一键上传与 MD5 去重
+基于 Chroma 向量数据库，覆盖洗护养护、尺码推荐、颜色搭配三大领域，支持 .txt 文档一键上传与 MD5 去重。
 
 📸 多模态智能识衣
 
-支持上传衣服照片，利用 VLM 大模型自动提取单品品类、细分颜色、面料材质、适用季节并完成结构化输出
+支持上传衣服照片，利用 VLM 大模型 (qwen-vl-max) 自动提取单品品类、细分颜色、面料材质、适用季节并完成结构化输出。
 
 👗 状态过滤周计划
 
-引入“洗涤限制状态机”算法，按天循环过滤并剔除已消耗单品，100% 避免 7 天穿搭推荐连续重复，科学盘活闲置衣物
+引入“洗涤限制状态机”算法，利用大模型原生 with_structured_output 特性，单次并发生成 7 天统筹规划，按天循环过滤并剔除已消耗单品，100% 避免 7 天穿搭推荐连续重复，科学盘活闲置衣物。
 
 🛡️ 自愈解析网
 
-独创正则表达式剥离与安全降级兜底技术，无惧多模态大模型 Markdown 格式杂音，确保系统永不崩溃
+独创正则表达式剥离与安全降级兜底技术，无惧多模态大模型 Markdown 格式杂音，确保系统永不崩溃。
 
+💾 并发安全存储
 
-
-<img width="2492" height="1287" alt="image" src="https://github.com/user-attachments/assets/5afd1b1c-692a-4a1e-a73d-d0114c1710b1" />
-<img width="2487" height="1282" alt="image" src="https://github.com/user-attachments/assets/245aa074-aa02-44bc-87f7-48150eca439e" />
-
-
-
+利用 msvcrt/fcntl 解决多线程操作 wardrobe.json 和聊天历史记录时的读写冲突问题，保障本地数字衣橱数据库的高并发写入安全。
 
 🏗️ 系统流程架构
-```
+
 [用户上传衣服照片] ──► [Pillow 图像压缩] ──► [VLM (qwen-vl-max)] 
                                                   │
                                                   ▼ (结构化标签)
@@ -66,25 +61,25 @@ ai-outfit-advisor/
 ├── vector_store_service.py     # 向量检索服务封装
 ├── knowledge_base.py           # 知识库引擎：Chroma + MD5 去重
 ├── config_data.py              # 集中配置：模型名称、切分参数、衣橱与数据库路径
-├── requirements.txt            # Python 依赖清单 (新增 Pillow 依赖)
+├── requirements.txt            # Python 依赖清单 (包含 LangChain, Streamlit, Chroma 等)
 ├── .env.example                # 环境变量配置模板
 ├── chat_history/               # [已忽略] 用户本地会话历史 (JSON)
 ├── data/
 │   ├── chroma/                 # [已忽略] Chroma 向量库持久化目录
 │   └── wardrobe.json           # [已忽略] 本地数字衣橱数据库
-└── 穿搭知识库素材/              # 包含洗涤养护、大厂面试、体型避坑、颜色选择等素材 ```
+└── 穿搭知识库素材/              # 包含洗涤养护、大厂面试、体型避坑、颜色选择等素材
 
 
 📦 快速开始
 
-安装依赖
+第一步、安装依赖
 
 git clone [https://github.com/sleepycat583/ai-outfit-advisor.git](https://github.com/sleepycat583/ai-outfit-advisor.git)
 cd ai-outfit-advisor
 pip install -r requirements.txt
 
 
-配置环境变量
+第二步、配置环境变量
 
 将项目根目录下的 .env.example 复制并重命名为 .env。
 
@@ -93,7 +88,7 @@ pip install -r requirements.txt
 DASHSCOPE_API_KEY="your-api-key"
 
 
-启动服务
+第三步、启动服务
 
 # 启动主应用 (问答端 + 智能衣橱端)
 streamlit run app_qa.py
@@ -104,24 +99,43 @@ streamlit run app_file_uploader.py
 
 📝 迭代日志 (Changelog)
 
-V2.2
+V2.2 全新升级
 
-* **真正的 AI Agent 架构**：抛弃传统线性对话，基于 LangChain ReAct 框架，赋予 LLM 自主思考与工具调度能力（Tool Calling）。
-* **结构化输出规划**：重构“周穿搭计划”功能，利用大模型原生 `with_structured_output` 特性，单次并发生成 7 天统筹规划，极大降低 API 耗时与 Token 成本。
-* **企业级数据闭环**：实现本地衣橱数据的持久化存储，支持标准的 CSV 文件一键导入/导出与去重校验。
-* **工业级容错与体验**：内置网络请求重试与降级（Fallback）机制，前端深度应用 Streamlit Session State，实现平滑的“思考过程”可视化与动态表单状态管理。
+真正的 AI Agent 架构：抛弃传统线性对话，基于 LangChain ReAct 框架，赋予 LLM 自主思考与工具调度能力（Tool Calling），整合了 DuckDuckGo（联网查天气）和本地知识库检索器。
 
-V2.1 全新升级
+结构化输出规划：重构“周穿搭计划”功能，利用大模型原生 with_structured_output 特性，单次并发生成 7 天统筹规划，极大降低 API 耗时与 Token 成本。
 
-| 引擎/模块 | 核心能力 (Agent + 业务状态机) |
-| :--- | :--- |
-| 🧠 **多维上下文动态 Agent** | 不再是盲目的天气搜索。系统会动态捕获前端用户的**城市位置**与**真实物理时间（推演未来7天）**，精准注入 Prompt，实现 100% 准确的属地化天气穿搭决策。 |
-| ⚙️ **基于真实物理的洗涤状态机** | 告别粗暴的随机推荐。引入细粒度的单品状态流转算法：**内搭穿1次冷却3天、下装穿2次大洗...** AI 必须在“冷却可用池”中做搭配，完美模拟现实衣橱盘活逻辑。 |
-| 📸 **多模态细粒度识衣矩阵** | 升级 VLM（Qwen-VL-Max）提示词工程，支持单张全身照**一次性拆解出上装、下装、鞋履多个实体**，配合前端多实例表单，实现数字衣橱的极速录入。 |
-| 🎨 **结构化输出与沉浸式 UI** | 利用 Few-Shot 强约束 LLM 稳定输出包含单品 ID 的 JSON 结构。前端采用 Streamlit 最新的 `st.popover` 气泡交互，实现文字计划与实物图片的**所见即所得**。 |
-| 🛡️ **高鲁棒性自愈解析网** | 独创正则表达式剥离与安全降级兜底技术，无惧多模态大模型 Markdown 格式杂音，确保系统永不崩溃。 |
+企业级数据闭环：实现本地衣橱数据的持久化存储，支持标准的 CSV 文件一键导入/导出与去重校验。利用 msvcrt/fcntl 解决多线程操作的读写冲突问题。
 
-V2.0 
+工业级容错与体验：内置网络请求重试与降级（Fallback）机制，前端深度应用 Streamlit Session State，实现平滑的“思考过程”可视化与动态表单状态管理。
+
+V2.1
+
+引擎/模块
+
+核心能力 (Agent + 业务状态机)
+
+🧠 多维上下文动态 Agent
+
+不再是盲目的天气搜索。系统会动态捕获前端用户的城市位置与真实物理时间（推演未来7天），精准注入 Prompt，实现 100% 准确的属地化天气穿搭决策。
+
+⚙️ 基于真实物理的洗涤状态机
+
+告别粗暴的随机推荐。引入细粒度的单品状态流转算法：内搭穿1次冷却3天、下装穿2次大洗... AI 必须在“冷却可用池”中做搭配，完美模拟现实衣橱盘活逻辑。
+
+📸 多模态细粒度识衣矩阵
+
+升级 VLM（Qwen-VL-Max）提示词工程，支持单张全身照一次性拆解出上装、下装、鞋履多个实体，配合前端多实例表单，实现数字衣橱的极速录入。
+
+🎨 结构化输出与沉浸式 UI
+
+利用 Few-Shot 强约束 LLM 稳定输出包含单品 ID 的 JSON 结构。前端采用 Streamlit 最新的 st.popover 气泡交互，实现文字计划与实物图片的所见即所得。
+
+🛡️ 高鲁棒性自愈解析网
+
+独创正则表达式剥离与安全降级兜底技术，无惧多模态大模型 Markdown 格式杂音，确保系统永不崩溃。
+
+V2.0
 
 多模态识衣入库：集成 qwen-vl-max 视觉理解，一键上传并录入你的专属“数字衣橱”。
 
@@ -138,5 +152,3 @@ V1.2
 侧边栏用户穿搭档案（性别/风格/身高体重）动态 System Prompt 注入。
 
 会话历史并发安全与 Streamlit 打字机流式渲染。
-
-Made with LangChain + Streamlit + Qwen-VL + ❤️
