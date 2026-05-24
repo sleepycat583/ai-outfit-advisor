@@ -6,7 +6,8 @@ import json
 
 from pydantic import BaseModel, Field
 
-from langchain_core.runnables import RunnableWithMessageHistory, RunnableLambda
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.runnables import RunnableLambda
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage
 from langchain_core.tools import Tool

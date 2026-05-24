@@ -59,8 +59,19 @@ class WardrobeService:
         self.vector_wardrobe = vector_wardrobe
         self._init_db()
 
+    # [并发修复] 统一数据库连接入口，开启 WAL 模式 + 20s 超时，解决高并发下 database is locked 崩溃
+    def _get_conn(self) -> sqlite3.Connection:
+        """获取数据库连接。
+        - timeout=20：写锁等待最长 20 秒，避免瞬时并发写立即报错。
+        - PRAGMA journal_mode=WAL：预写式日志，允许多个读操作与一个写操作并发执行。
+        """
+        conn = sqlite3.connect(self.db_path, timeout=20)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        return conn
+
     def _init_db(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        # [并发修复] 使用 _get_conn() 替代裸 sqlite3.connect()
+        with self._get_conn() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS wardrobe_items (
                     id TEXT PRIMARY KEY,
@@ -159,7 +170,8 @@ class WardrobeService:
         return normalized
 
     def get_all_items(self) -> list[dict]:
-        with sqlite3.connect(self.db_path) as conn:
+        # [并发修复] 使用 _get_conn() 替代裸 sqlite3.connect()
+        with self._get_conn() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("SELECT * FROM wardrobe_items ORDER BY created_at DESC").fetchall()
             return [_row_to_dict(r) for r in rows]
@@ -174,7 +186,8 @@ class WardrobeService:
         created_at = datetime.now().isoformat(timespec="seconds")
         season_str = _season_to_str(item_data.get("season", []))
 
-        with sqlite3.connect(self.db_path) as conn:
+        # [并发修复] 使用 _get_conn() 替代裸 sqlite3.connect()
+        with self._get_conn() as conn:
             conn.execute(
                 """INSERT INTO wardrobe_items (id, category, sub_category, color, material, season, image_path, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -209,7 +222,8 @@ class WardrobeService:
 
     def update_item(self, item_id: str, new_data: dict) -> dict | None:
         """更新指定 ID 的单品数据，返回更新后的 dict 或 None。"""
-        with sqlite3.connect(self.db_path) as conn:
+        # [并发修复] 使用 _get_conn() 替代裸 sqlite3.connect()
+        with self._get_conn() as conn:
             conn.row_factory = sqlite3.Row
             existing = conn.execute(
                 "SELECT * FROM wardrobe_items WHERE id = ?", (item_id,)
@@ -243,7 +257,8 @@ class WardrobeService:
         return updated_item
 
     def delete_item(self, item_id: str) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        # [并发修复] 使用 _get_conn() 替代裸 sqlite3.connect()
+        with self._get_conn() as conn:
             conn.execute("DELETE FROM wardrobe_items WHERE id = ?", (item_id,))
             conn.commit()
 
@@ -299,7 +314,8 @@ class WardrobeService:
         if not new_items:
             return 0
 
-        with sqlite3.connect(self.db_path) as conn:
+        # [并发修复] 使用 _get_conn() 替代裸 sqlite3.connect()
+        with self._get_conn() as conn:
             if mode == "replace":
                 conn.execute("DELETE FROM wardrobe_items")
                 conn.executemany(

@@ -4,6 +4,10 @@ AI 穿搭顾问 - 综合应用
 
 import streamlit as st
 
+# [安全修复] 移除 exec() 任意代码执行漏洞，改用安全的模块导入
+import app_qa
+import app_file_uploader
+
 # 设置页面配置
 st.set_page_config(
     page_title="小衣 · AI智能穿搭顾问",
@@ -20,58 +24,8 @@ app_choice = st.sidebar.radio(
 )
 
 if app_choice == "📚 知识库管理":
-    # 导入上传模块
-    import time
-    from knowledge_base import KnowledgeBaseService
-
-    st.title("知识库更新服务")
-    st.markdown("**上传您的穿搭知识库文件**")
-
-    uploader_file = st.file_uploader(
-        label="请上传TXT文件",
-        type=['txt'],
-        accept_multiple_files=False,
-    )
-
-    if "service" not in st.session_state:
-        st.session_state["service"] = KnowledgeBaseService()
-
-    if "uploaded_file_id" not in st.session_state:
-        st.session_state["uploaded_file_id"] = None
-
-    if uploader_file is not None:
-        file_name = uploader_file.name
-        file_type = uploader_file.type
-        file_size = uploader_file.size / 1024
-
-        st.subheader(f"文件名: {file_name}")
-        st.write(f"格式: {file_type} | 大小: {file_size:.2f} KB")
-
-        raw = uploader_file.getvalue()
-        used_encoding = None
-        for enc in ("utf-8-sig", "utf-8", "gb18030", "gbk"):
-            try:
-                text = raw.decode(enc)
-                used_encoding = enc
-                break
-            except UnicodeDecodeError:
-                continue
-        if used_encoding is None:
-            text = raw.decode("utf-8", errors="replace")
-            used_encoding = "utf-8 (replace)"
-
-        st.caption(f"检测到编码: {used_encoding}")
-
-        current_file_id = id(uploader_file)
-        if st.session_state["uploaded_file_id"] != current_file_id:
-            with st.spinner("载入知识库中..."):
-                time.sleep(1)
-                result = st.session_state["service"].upload_by_str(text, file_name)
-                st.write(result)
-                st.session_state["uploaded_file_id"] = current_file_id
-        else:
-            st.info("此文件已上传，无需重复处理")
-
+    # [安全修复] 不再使用 inline 代码或 exec()，改为调用独立的模块函数
+    app_file_uploader.render_page()
 else:
-    # 导入问答模块
-    exec(open("app_qa.py").read())
+    # [安全修复] 不再使用 exec() 执行任意代码，改为安全的函数调用
+    app_qa.render_page()
