@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import sqlite3
 import uuid
@@ -27,6 +28,10 @@ class UserService:
                     created_at TEXT DEFAULT ''
                 )
             """)
+            try:
+                conn.execute("ALTER TABLE users ADD COLUMN profile TEXT DEFAULT '{}'")
+            except sqlite3.OperationalError:
+                pass  # Column already exists from previous migration
             conn.commit()
 
     @staticmethod
@@ -82,6 +87,24 @@ class UserService:
                 return False, "密码错误"
 
             return True, user["id"]
+
+    def save_profile(self, user_id: str, profile: dict) -> bool:
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE users SET profile = ? WHERE id = ?",
+                (json.dumps(profile, ensure_ascii=False), user_id),
+            )
+            conn.commit()
+            return True
+
+    def get_profile(self, user_id: str) -> dict:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT profile FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            if row and row[0]:
+                return json.loads(row[0])
+            return {}
 
     def get_user(self, user_id: str) -> dict | None:
         with self._get_conn() as conn:

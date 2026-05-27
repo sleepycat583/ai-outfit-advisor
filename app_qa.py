@@ -9,6 +9,7 @@ import config_data as config
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_community.embeddings import DashScopeEmbeddings
 from rag import RagService, ConsoleLoggingHandler, FALLBACK_MESSAGE
+from user_service import UserService
 from vector_store_service import VectorWardrobeService
 from wardrobe_service import WardrobeService
 
@@ -56,6 +57,38 @@ def render_page():
         </div>
     </div>"""
 
+
+    def build_wardrobe_card(item, img_b64, icon):
+        import html as _html
+
+        name = _html.escape(item.get("sub_category") or item.get("category") or "单品")
+        color = _html.escape(item.get("color", "未知"))
+        material = _html.escape(item.get("material", "未知"))
+        return f"""<div style="background: var(--bg-secondary); border-radius: 8px; border: 1px solid var(--border-color); overflow: hidden; width: 100%; box-shadow: var(--shadow-sm);">
+    <div style="width: 100%; aspect-ratio: 3 / 4; max-height: 260px; background: #f5f5f5; display: flex; align-items: center; justify-content: center; overflow: hidden;">
+        <img src="data:image/jpeg;base64,{img_b64}" style="max-width: 100%; max-height: 100%; object-fit: contain;">
+    </div>
+    <div style="padding: 6px 8px 5px;">
+        <div style="font-weight: 600; font-size: 13px; color: var(--text-primary); margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{icon} {name}</div>
+        <span style="font-size: 11px; color: #888;">🎨 {color}</span>
+        <span style="font-size: 11px; color: #888; margin-left: 6px;">🧵 {material}</span>
+    </div>
+</div>"""
+
+    def build_wardrobe_card_placeholder(item, icon):
+        import html as _html
+
+        name = _html.escape(item.get("sub_category") or item.get("category") or "单品")
+        color = _html.escape(item.get("color", "未知"))
+        material = _html.escape(item.get("material", "未知"))
+        return f"""<div style="background: var(--bg-secondary); border-radius: 8px; border: 1px solid var(--border-color); overflow: hidden; width: 100%; box-shadow: var(--shadow-sm);">
+    <div style="width: 100%; aspect-ratio: 3 / 4; max-height: 260px; background: rgba(163,177,155,0.06); display: flex; align-items: center; justify-content: center; font-size: 42px;">{icon}</div>
+    <div style="padding: 6px 8px 5px;">
+        <div style="font-weight: 600; font-size: 13px; color: var(--text-primary); margin-bottom: 3px;">{icon} {name}</div>
+        <span style="font-size: 11px; color: #888;">🎨 {color}</span>
+        <span style="font-size: 11px; color: #888; margin-left: 6px;">🧵 {material}</span>
+    </div>
+</div>"""
 
     def render_recommendations(item_ids, w_items):
         """在文字下方以网格形式渲染推荐单品列表。"""
@@ -414,10 +447,25 @@ def render_page():
 
     with st.sidebar:
         st.header("👤 我的穿搭档案")
+
+        user_service = UserService()
+        saved_profile = user_service.get_profile(user_id)
+
+        if "user_gender" not in st.session_state:
+            st.session_state["user_gender"] = saved_profile.get("gender", "女生")
+        if "user_style" not in st.session_state:
+            st.session_state["user_style"] = saved_profile.get("style", "日常休闲")
+        if "user_body" not in st.session_state:
+            st.session_state["user_body"] = saved_profile.get("body", "")
+        if "user_city" not in st.session_state:
+            st.session_state["user_city"] = saved_profile.get("city", "北京")
+        if "_last_saved_profile" not in st.session_state:
+            st.session_state["_last_saved_profile"] = saved_profile.copy()
+
         gender_options = ["女生", "男生"]
         gender_labels = {"女生": "👩 女生", "男生": "👨 男生"}
         user_gender = st.selectbox(
-            "选择你的性别", gender_options, format_func=lambda v: gender_labels.get(v, v)
+            "选择你的性别", gender_options, key="user_gender", format_func=lambda v: gender_labels.get(v, v)
         )
         style_options = ["日常休闲", "职场通勤", "甜美可爱", "运动风", "极简冷淡风"]
         style_labels = {
@@ -430,12 +478,23 @@ def render_page():
         user_style = st.selectbox(
             "偏好的穿搭风格",
             style_options,
+            key="user_style",
             format_func=lambda v: style_labels.get(v, v),
         )
         user_body = st.text_input(
-            "📏 输入你的身高/体重 (选填)", placeholder="例如：165cm / 50kg"
+            "📏 输入你的身高/体重 (选填)", key="user_body", placeholder="例如：165cm / 50kg"
         )
-        user_city = st.text_input("📍 所在城市", value="北京", placeholder="例如：上海、广州、成都")
+        user_city = st.text_input("📍 所在城市", key="user_city", placeholder="例如：上海、广州、成都")
+
+        current_profile = {
+            "gender": user_gender,
+            "style": user_style,
+            "body": user_body,
+            "city": user_city,
+        }
+        if st.session_state.get("_last_saved_profile") != current_profile:
+            user_service.save_profile(user_id, current_profile)
+            st.session_state["_last_saved_profile"] = current_profile.copy()
 
         with st.expander("🛠️ 开发者模式 (调试信息)", expanded=False):
             st.text(f"Session ID: {st.session_state['session_id']}")
@@ -743,6 +802,7 @@ def render_page():
 
         # ===== 数据管理工具栏 =====
         items = service.get_all_items()
+
         with st.expander("💾 衣橱备份与数据管理", expanded=False):
             col_export, col_import = st.columns(2)
 
@@ -796,7 +856,6 @@ def render_page():
                 "配饰": "🧢",
             }
             category_order = ["外套", "内搭", "下装", "鞋履", "配饰"]
-            COLS_PER_ROW = 4
 
             # ===== 筛选区 =====
             unique_categories = sorted({it.get("category", "其他") for it in items})
@@ -889,56 +948,60 @@ def render_page():
                         st.session_state.editing_item_id = None
                         st.rerun()
 
-            def render_card(item, unique_idx=0):
-                """Step 4: 保留原有单品卡片内容和交互逻辑"""
-                category = item.get("category", "")
-                icon = icon_map.get(category, "👗")
-                title = item.get("sub_category") or category or "未命名"
-                st.markdown(f"#### {icon} {title}")
-                st.write(f"颜色：{item.get('color', '未知')}")
-                st.write(f"材质：{item.get('material', '未知')}")
-                image_path = item.get("image_path")
-                if image_path and os.path.exists(image_path):
-                    st.markdown("📸 :green[**已有照片**]")
-                else:
-                    st.caption("🌫️ 暂无图片")
-                col_view, col_del = st.columns(2)
-                with col_view:
-                    if st.button("✏️ 查看/编辑", key=f"view_{item.get('id')}_{unique_idx}", use_container_width=True):
-                        st.session_state.editing_item_id = item.get("id")
-                        st.rerun()
-                with col_del:
-                    if st.button("❌ 移除", key=f"delete_{item.get('id')}_{unique_idx}", use_container_width=True):
-                        service.delete_item(item.get("id"))
-                        if st.session_state.editing_item_id == item.get("id"):
+                st.markdown("---")
+                confirming = st.session_state.get("_confirming_delete") == item_id
+                if confirming:
+                    st.warning("⚠️ 确认删除？此操作不可撤销。")
+                    c_confirm, c_cancel = st.columns(2)
+                    with c_confirm:
+                        if st.button("✅ 确认删除", key=f"{prefix}_del_confirm", use_container_width=True):
+                            svc.delete_item(item_id)
                             st.session_state.editing_item_id = None
+                            st.session_state._confirming_delete = None
+                            st.toast("已删除！🗑️", icon="✅")
+                            time.sleep(0.3)
+                            st.rerun()
+                    with c_cancel:
+                        if st.button("❌ 取消", key=f"{prefix}_del_cancel", use_container_width=True):
+                            st.session_state._confirming_delete = None
+                            st.rerun()
+                else:
+                    if st.button("🗑️ 删除此单品", key=f"{prefix}_delete"):
+                        st.session_state._confirming_delete = item_id
                         st.rerun()
 
-            # Step 2 & 3: 按类别分区，网格渲染
-            global_idx = 0
+            def render_category_grid(cat_items):
+                """用 st.columns 渲染卡片网格，按钮与卡片同列对齐。"""
+                COLS_PER_ROW = 5
+                for row_start in range(0, len(cat_items), COLS_PER_ROW):
+                    row_items = cat_items[row_start:row_start + COLS_PER_ROW]
+                    cols = st.columns(COLS_PER_ROW)
+                    for i, item in enumerate(row_items):
+                        item_id = item.get("id", "")
+                        icon = icon_map.get(item.get("category", ""), "👗")
+                        image_path = item.get("image_path")
+                        with cols[i]:
+                            if image_path and os.path.exists(image_path):
+                                img_b64 = get_image_base64(image_path)
+                                st.markdown(build_wardrobe_card(item, img_b64, icon), unsafe_allow_html=True)
+                            else:
+                                st.markdown(build_wardrobe_card_placeholder(item, icon), unsafe_allow_html=True)
+                            if st.button("✏️ 编辑", key=f"card_edit_{item_id}", use_container_width=True):
+                                st.session_state.editing_item_id = item_id
+                                st.rerun()
+
+            # Step 2: 按类别分区，网格渲染
             for cat_name in category_order:
                 cat_items = grouped.pop(cat_name, [])
                 if not cat_items:
                     continue
                 st.subheader(f"🏷️ {cat_name}")
-                for row_start in range(0, len(cat_items), COLS_PER_ROW):
-                    row_items = cat_items[row_start:row_start + COLS_PER_ROW]
-                    cols = st.columns(COLS_PER_ROW)
-                    for col_idx, item in enumerate(row_items):
-                        with cols[col_idx]:
-                            render_card(item, unique_idx=global_idx)
-                            global_idx += 1
+                render_category_grid(cat_items)
 
             # 兜底：category_order 之外的分类
             for cat_name, cat_items in grouped.items():
                 st.subheader(f"🏷️ {cat_name}")
-                for row_start in range(0, len(cat_items), COLS_PER_ROW):
-                    row_items = cat_items[row_start:row_start + COLS_PER_ROW]
-                    cols = st.columns(COLS_PER_ROW)
-                    for col_idx, item in enumerate(row_items):
-                        with cols[col_idx]:
-                            render_card(item, unique_idx=global_idx)
-                            global_idx += 1
+                render_category_grid(cat_items)
 
             # ===== 中央详情/编辑表单（仅当选中某个单品时渲染，全局唯一） =====
             if st.session_state.editing_item_id is not None:
