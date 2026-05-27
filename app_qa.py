@@ -386,12 +386,17 @@ def render_page():
     header_html = "<div class=\"app-header\"><span class=\"app-icon\">☀️</span><div class=\"app-title\">小衣 · 你的专属穿搭顾问</div></div>"
     st.markdown(header_html, unsafe_allow_html=True)
 
+    user_id = st.session_state.get("user_id")
+    if not user_id:
+        st.warning("请先登录")
+        st.stop()
+
     if "message" not in st.session_state:
         st.session_state["message"] = [{"role": "assistant", "content": "你好，有什么可以帮助你？"}]
 
     if "vector_wardrobe" not in st.session_state:
         embedding = DashScopeEmbeddings(model=config.EMBEDDING_MODEL_NAME)
-        st.session_state["vector_wardrobe"] = VectorWardrobeService(embedding)
+        st.session_state["vector_wardrobe"] = VectorWardrobeService(embedding, user_id=user_id)
 
     if "rag" not in st.session_state:
         st.session_state["rag"] = RagService(
@@ -399,7 +404,7 @@ def render_page():
         )
 
     if "session_id" not in st.session_state:
-        st.session_state["session_id"] = uuid.uuid4().hex
+        st.session_state["session_id"] = f"chat_session_{user_id}"
 
     if "wardrobe_draft" not in st.session_state:
         st.session_state["wardrobe_draft"] = None
@@ -437,14 +442,30 @@ def render_page():
 
         st.markdown('<div class="cozy-divider"></div>', unsafe_allow_html=True)
         if st.sidebar.button("🔄 重置系统与服务", use_container_width=True):
-            st.session_state.clear()
+            # 只清空应用状态，保留登录态（authenticated / user_id / username）
+            for key in ("message", "session_id", "wardrobe_draft", "weekly_plan",
+                        "vector_wardrobe", "rag", "editing_item_id"):
+                st.session_state.pop(key, None)
             st.success("服务已重置，正在重新加载...")
+            st.rerun()
+
+        if st.sidebar.button("🗑️ 清空对话历史", use_container_width=True):
+            from history import FileChatMessageHistory
+            from config_data import CHAT_HISTORY_DIR
+
+            FileChatMessageHistory(
+                session_id=st.session_state["session_id"],
+                storage_path=CHAT_HISTORY_DIR,
+            ).clear()
+            st.session_state["message"] = [{"role": "assistant", "content": "你好，有什么可以帮助你？"}]
+            st.toast("对话历史已清空", icon="🗑️")
+            time.sleep(0.3)
             st.rerun()
 
     tab_chat, tab_wardrobe = st.tabs(["💬 穿搭顾问", "👗 智能衣橱"])
 
     with tab_chat:
-        wardrobe_service = WardrobeService(vector_wardrobe=st.session_state["vector_wardrobe"])
+        wardrobe_service = WardrobeService(user_id=user_id, vector_wardrobe=st.session_state["vector_wardrobe"])
         wardrobe_items = wardrobe_service.get_all_items()
 
         st.markdown("#### 📅 本周穿搭计划")
@@ -599,7 +620,7 @@ def render_page():
 
     with tab_wardrobe:
         st.subheader("👗 智能衣橱")
-        service = WardrobeService(vector_wardrobe=st.session_state["vector_wardrobe"])
+        service = WardrobeService(user_id=user_id, vector_wardrobe=st.session_state["vector_wardrobe"])
         category_options = config.WARDROBE_CATEGORIES
         season_options = ["春", "夏", "秋", "冬"]
 

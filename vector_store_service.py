@@ -34,9 +34,10 @@ class VectorStoreService(object):
 class VectorWardrobeService:
     """管理衣橱单品的向量索引（独立 Chroma Collection），用于语义检索 Top-K 单品。"""
 
-    def __init__(self, embedding):
+    def __init__(self, embedding, user_id: str = ""):
         self.embedding = embedding
-        persist_directory = os.path.join(config.persist_directory, "wardrobe")
+        self.user_id = user_id
+        persist_directory = os.path.join(config.persist_directory, user_id, "wardrobe") if user_id else os.path.join(config.persist_directory, "wardrobe")
         os.makedirs(persist_directory, exist_ok=True)
         self.vector_store = Chroma(
             collection_name="wardrobe_items",

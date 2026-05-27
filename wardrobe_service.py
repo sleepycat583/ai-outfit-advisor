@@ -49,12 +49,14 @@ def _item_to_text(item: dict) -> str:
 class WardrobeService:
     def __init__(
         self,
+        user_id: str,
         db_path: str | None = None,
         vector_wardrobe: Optional["VectorWardrobeService"] = None,
     ) -> None:
-        self.db_path = db_path or "./data/wardrobe.db"
+        self.user_id = user_id
+        self.db_path = db_path or f"./data/{user_id}/wardrobe.db"
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        self.image_dir = config.WARDROBE_IMAGE_DIR
+        self.image_dir = f"./data/{user_id}/wardrobe_images"
         os.makedirs(self.image_dir, exist_ok=True)
         self.vector_wardrobe = vector_wardrobe
         self._init_db()
