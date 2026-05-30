@@ -4,7 +4,7 @@ import os
 import uuid
 from datetime import datetime
 
-from supabase import Client, create_client
+from supabase_config import get_supabase_client
 
 
 def _now_iso() -> str:
@@ -12,45 +12,15 @@ def _now_iso() -> str:
 
 
 class UserService:
-    """用户服务（Supabase 持久化）
+    """用户服务（Supabase PostgreSQL 持久化）
 
-    Streamlit Cloud 使用临时文件系统，SQLite 数据库在容器回收后会丢失。
-    因此将所有用户数据迁移到 Supabase PostgreSQL 实现持久化存储。
+    Streamlit Cloud 使用临时文件系统，因此将用户数据存储在 Supabase。
     """
 
     def __init__(self, db_path: str | None = None):
-        # db_path 参数保留用于向后兼容，实际已不再使用
+        # db_path 参数保留用于向后兼容
         _ = db_path
-        url, key = self._get_credentials()
-        self.supabase: Client = create_client(url, key)
-
-    @staticmethod
-    def _get_credentials() -> tuple[str, str]:
-        """获取 Supabase 连接凭据。
-
-        优先从 Streamlit secrets 读取（Streamlit Cloud 部署环境），
-        其次从环境变量读取（本地开发环境）。
-        """
-        try:
-            import streamlit as st
-
-            url = st.secrets.get("SUPABASE_URL")
-            key = st.secrets.get("SUPABASE_KEY")
-            if url and key:
-                return url, key
-        except Exception:
-            pass
-
-        url = os.environ.get("SUPABASE_URL")
-        key = os.environ.get("SUPABASE_KEY")
-        if url and key:
-            return url, key
-
-        raise RuntimeError(
-            "未找到 Supabase 连接凭据。请执行以下操作之一：\n"
-            "  1. Streamlit Cloud：在 App Settings → Secrets 中添加 SUPABASE_URL 和 SUPABASE_KEY\n"
-            "  2. 本地开发：创建 .streamlit/secrets.toml 文件，或设置环境变量"
-        )
+        self.supabase = get_supabase_client()
 
     @staticmethod
     def _hash_password(password: str, salt: str | None = None) -> tuple[str, str]:

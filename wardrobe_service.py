@@ -3,7 +3,6 @@ import io
 import json
 import os
 import re
-import sqlite3
 import uuid
 from datetime import datetime
 from typing import Optional, TYPE_CHECKING
@@ -13,6 +12,7 @@ from PIL import Image
 import config_data as config
 import dashscope
 from prompts import VLM_ANALYZE_PROMPT
+from supabase_config import WARDROBE_BUCKET, get_supabase_client
 
 if TYPE_CHECKING:
     from vector_store_service import VectorWardrobeService
@@ -30,12 +30,6 @@ def _season_to_list(season_str: str) -> list[str]:
     return [s.strip() for s in season_str.split(",") if s.strip()]
 
 
-def _row_to_dict(row: sqlite3.Row) -> dict:
-    d = dict(row)
-    d["season"] = _season_to_list(d.get("season", ""))
-    return d
-
-
 def _item_to_text(item: dict) -> str:
     item_id = item.get("id", "")
     category = item.get("category", "")
@@ -47,46 +41,69 @@ def _item_to_text(item: dict) -> str:
 
 
 class WardrobeService:
+    """衣橱服务（Supabase PostgreSQL + Storage 持久化）
+
+    数据存储在 Supabase wardrobe_items 表，图片存储在 Supabase Storage
+    wardrobe-images bucket。
+    """
+
     def __init__(
         self,
         user_id: str,
         db_path: str | None = None,
         vector_wardrobe: Optional["VectorWardrobeService"] = None,
     ) -> None:
+        # db_path 参数保留用于向后兼容
+        _ = db_path
         self.user_id = user_id
-        self.db_path = db_path or f"./data/{user_id}/wardrobe.db"
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        self.image_dir = f"./data/{user_id}/wardrobe_images"
-        os.makedirs(self.image_dir, exist_ok=True)
+        self.supabase = get_supabase_client()
         self.vector_wardrobe = vector_wardrobe
-        self._init_db()
 
-    # [并发修复] 统一数据库连接入口，开启 WAL 模式 + 20s 超时，解决高并发下 database is locked 崩溃
-    def _get_conn(self) -> sqlite3.Connection:
-        """获取数据库连接。
-        - timeout=20：写锁等待最长 20 秒，避免瞬时并发写立即报错。
-        - PRAGMA journal_mode=WAL：预写式日志，允许多个读操作与一个写操作并发执行。
-        """
-        conn = sqlite3.connect(self.db_path, timeout=20)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        return conn
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
-    def _init_db(self) -> None:
-        # [并发修复] 使用 _get_conn() 替代裸 sqlite3.connect()
-        with self._get_conn() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS wardrobe_items (
-                    id TEXT PRIMARY KEY,
-                    category TEXT NOT NULL,
-                    sub_category TEXT DEFAULT '',
-                    color TEXT DEFAULT '',
-                    material TEXT DEFAULT '',
-                    season TEXT DEFAULT '',
-                    image_path TEXT DEFAULT '',
-                    created_at TEXT DEFAULT ''
-                )
-            """)
-            conn.commit()
+    def _storage_path(self, item_id: str) -> str:
+        """Supabase Storage 中的图片路径。"""
+        return f"{self.user_id}/{item_id}.jpg"
+
+    def _get_public_url(self, storage_path: str) -> str:
+        """获取 Supabase Storage 图片的公开 URL。"""
+        return (
+            self.supabase.storage.from_(WARDROBE_BUCKET)
+            .get_public_url(storage_path)
+        )
+
+    def _row_to_dict(self, row: dict) -> dict:
+        """将 Supabase 返回的行数据转为业务层 dict。"""
+        item = dict(row)
+        item["season"] = _season_to_list(item.get("season", ""))
+        # 将 storage path 转换为公开 URL
+        if item.get("image_path"):
+            item["image_path"] = self._get_public_url(item["image_path"])
+        return item
+
+    def _upload_image(self, item_id: str, image_bytes: bytes) -> str:
+        """上传图片到 Supabase Storage，返回 storage path。"""
+        storage_path = self._storage_path(item_id)
+        self.supabase.storage.from_(WARDROBE_BUCKET).upload(
+            storage_path,
+            image_bytes,
+            {"content-type": "image/jpeg"},
+        )
+        return storage_path
+
+    def _delete_image(self, item_id: str) -> None:
+        """从 Supabase Storage 中删除图片。"""
+        storage_path = self._storage_path(item_id)
+        try:
+            self.supabase.storage.from_(WARDROBE_BUCKET).remove([storage_path])
+        except Exception:
+            pass  # 图片可能不存在，忽略
+
+    # ------------------------------------------------------------------
+    # VLM 图像分析（纯计算，不涉及存储）
+    # ------------------------------------------------------------------
 
     def preprocess_image(self, image_bytes: bytes) -> str:
         image = Image.open(io.BytesIO(image_bytes))
@@ -171,40 +188,43 @@ class WardrobeService:
 
         return normalized
 
+    # ------------------------------------------------------------------
+    # CRUD
+    # ------------------------------------------------------------------
+
     def get_all_items(self) -> list[dict]:
-        # [并发修复] 使用 _get_conn() 替代裸 sqlite3.connect()
-        with self._get_conn() as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute("SELECT * FROM wardrobe_items ORDER BY created_at DESC").fetchall()
-            return [_row_to_dict(r) for r in rows]
+        result = (
+            self.supabase.table("wardrobe_items")
+            .select("*")
+            .eq("user_id", self.user_id)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        return [self._row_to_dict(r) for r in (result.data or [])]
 
     def add_item(self, item_data: dict, image_bytes: bytes = None) -> dict:
         new_id = str(uuid.uuid4())
-        image_path = ""
+        storage_path = ""
+
         if image_bytes:
-            image_path = os.path.join(self.image_dir, f"{new_id}.jpg")
-            with open(image_path, "wb") as f:
-                f.write(image_bytes)
+            storage_path = self._upload_image(new_id, image_bytes)
+
         created_at = datetime.now().isoformat(timespec="seconds")
         season_str = _season_to_str(item_data.get("season", []))
 
-        # [并发修复] 使用 _get_conn() 替代裸 sqlite3.connect()
-        with self._get_conn() as conn:
-            conn.execute(
-                """INSERT INTO wardrobe_items (id, category, sub_category, color, material, season, image_path, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    new_id,
-                    item_data.get("category", ""),
-                    item_data.get("sub_category", ""),
-                    item_data.get("color", ""),
-                    item_data.get("material", ""),
-                    season_str,
-                    image_path,
-                    created_at,
-                ),
-            )
-            conn.commit()
+        self.supabase.table("wardrobe_items").insert(
+            {
+                "id": new_id,
+                "user_id": self.user_id,
+                "category": item_data.get("category", ""),
+                "sub_category": item_data.get("sub_category", ""),
+                "color": item_data.get("color", ""),
+                "material": item_data.get("material", ""),
+                "season": season_str,
+                "image_path": storage_path,
+                "created_at": created_at,
+            }
+        ).execute()
 
         new_item = {
             "id": new_id,
@@ -213,7 +233,7 @@ class WardrobeService:
             "color": item_data.get("color", ""),
             "material": item_data.get("material", ""),
             "season": item_data.get("season", []),
-            "image_path": image_path,
+            "image_path": self._get_public_url(storage_path) if storage_path else "",
             "created_at": created_at,
         }
 
@@ -222,36 +242,44 @@ class WardrobeService:
 
         return new_item
 
-    def update_item(self, item_id: str, new_data: dict) -> dict | None:
-        """更新指定 ID 的单品数据，返回更新后的 dict 或 None。"""
-        # [并发修复] 使用 _get_conn() 替代裸 sqlite3.connect()
-        with self._get_conn() as conn:
-            conn.row_factory = sqlite3.Row
-            existing = conn.execute(
-                "SELECT * FROM wardrobe_items WHERE id = ?", (item_id,)
-            ).fetchone()
-            if existing is None:
-                return None
+    def update_item(self, item_id: str, new_data: dict, image_bytes: bytes = None) -> dict | None:
+        """更新指定 ID 的单品数据。image_bytes 不为 None 时替换图片。"""
+        # 检查是否存在
+        existing = (
+            self.supabase.table("wardrobe_items")
+            .select("*")
+            .eq("id", item_id)
+            .eq("user_id", self.user_id)
+            .execute()
+        )
+        if not existing.data:
+            return None
 
-            updates = {}
-            for field in ["category", "sub_category", "color", "material", "image_path"]:
-                if field in new_data:
-                    updates[field] = new_data[field]
-            if "season" in new_data:
-                updates["season"] = _season_to_str(new_data["season"])
+        updates = {}
+        for field in ["category", "sub_category", "color", "material"]:
+            if field in new_data:
+                updates[field] = new_data[field]
+        if "season" in new_data:
+            updates["season"] = _season_to_str(new_data["season"])
 
-            if updates:
-                set_clause = ", ".join(f"{k} = ?" for k in updates)
-                values = list(updates.values()) + [item_id]
-                conn.execute(
-                    f"UPDATE wardrobe_items SET {set_clause} WHERE id = ?", values
-                )
-                conn.commit()
+        # 处理图片更新
+        if image_bytes:
+            storage_path = self._upload_image(item_id, image_bytes)
+            updates["image_path"] = storage_path
 
-            row = conn.execute(
-                "SELECT * FROM wardrobe_items WHERE id = ?", (item_id,)
-            ).fetchone()
-            updated_item = _row_to_dict(row)
+        if updates:
+            self.supabase.table("wardrobe_items").update(updates).eq("id", item_id).execute()
+
+        # 获取更新后的数据
+        result = (
+            self.supabase.table("wardrobe_items")
+            .select("*")
+            .eq("id", item_id)
+            .execute()
+        )
+        if not result.data:
+            return None
+        updated_item = self._row_to_dict(result.data[0])
 
         if self.vector_wardrobe:
             self.vector_wardrobe.update_items([(item_id, _item_to_text(updated_item))])
@@ -259,10 +287,8 @@ class WardrobeService:
         return updated_item
 
     def delete_item(self, item_id: str) -> None:
-        # [并发修复] 使用 _get_conn() 替代裸 sqlite3.connect()
-        with self._get_conn() as conn:
-            conn.execute("DELETE FROM wardrobe_items WHERE id = ?", (item_id,))
-            conn.commit()
+        self._delete_image(item_id)
+        self.supabase.table("wardrobe_items").delete().eq("id", item_id).execute()
 
         if self.vector_wardrobe:
             self.vector_wardrobe.delete_items([item_id])
@@ -316,54 +342,54 @@ class WardrobeService:
         if not new_items:
             return 0
 
-        # [并发修复] 使用 _get_conn() 替代裸 sqlite3.connect()
-        with self._get_conn() as conn:
-            if mode == "replace":
-                conn.execute("DELETE FROM wardrobe_items")
-                conn.executemany(
-                    """INSERT INTO wardrobe_items (id, category, sub_category, color, material, season, image_path, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, '', ?)""",
-                    [
-                        (
-                            item["id"],
-                            item["category"],
-                            item["sub_category"],
-                            item["color"],
-                            item["material"],
-                            _season_to_str(item["season"]),
-                            item["created_at"],
-                        )
-                        for item in new_items
-                    ],
-                )
-                conn.commit()
-                count = len(new_items)
-            else:
-                existing_ids = {
-                    row[0]
-                    for row in conn.execute("SELECT id FROM wardrobe_items").fetchall()
+        if mode == "replace":
+            # 删除当前用户所有记录
+            self.supabase.table("wardrobe_items").delete().eq("user_id", self.user_id).execute()
+            # 批量插入
+            rows = [
+                {
+                    "id": item["id"],
+                    "user_id": self.user_id,
+                    "category": item["category"],
+                    "sub_category": item["sub_category"],
+                    "color": item["color"],
+                    "material": item["material"],
+                    "season": _season_to_str(item["season"]),
+                    "image_path": "",
+                    "created_at": item["created_at"],
                 }
-                truly_new = [item for item in new_items if item["id"] not in existing_ids]
-                if not truly_new:
-                    return 0
-                conn.executemany(
-                    """INSERT INTO wardrobe_items (id, category, sub_category, color, material, season, image_path, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, '', ?)""",
-                    [
-                        (
-                            item["id"],
-                            item["category"],
-                            item["sub_category"],
-                            item["color"],
-                            item["material"],
-                            _season_to_str(item["season"]),
-                            item["created_at"],
-                        )
-                        for item in truly_new
-                    ],
-                )
-                conn.commit()
-                count = len(truly_new)
+                for item in new_items
+            ]
+            self.supabase.table("wardrobe_items").insert(rows).execute()
+            count = len(new_items)
+        else:
+            # 获取已存在的 id
+            existing_result = (
+                self.supabase.table("wardrobe_items")
+                .select("id")
+                .eq("user_id", self.user_id)
+                .execute()
+            )
+            existing_ids = {r["id"] for r in (existing_result.data or [])}
+            truly_new = [item for item in new_items if item["id"] not in existing_ids]
+            if not truly_new:
+                return 0
+            rows = [
+                {
+                    "id": item["id"],
+                    "user_id": self.user_id,
+                    "category": item["category"],
+                    "sub_category": item["sub_category"],
+                    "color": item["color"],
+                    "material": item["material"],
+                    "season": _season_to_str(item["season"]),
+                    "image_path": "",
+                    "created_at": item["created_at"],
+                }
+                for item in truly_new
+            ]
+            self.supabase.table("wardrobe_items").insert(rows).execute()
+            count = len(truly_new)
 
         if self.vector_wardrobe and count > 0:
             sync_items = [(item["id"], _item_to_text(item)) for item in new_items]

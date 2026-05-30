@@ -34,7 +34,11 @@ def render_page():
 
 
     def get_image_base64(image_path):
-        """读取本地图片文件并转换为 Base64 字符串。"""
+        """读取图片并转换为 Base64 字符串。支持本地路径和 HTTP(S) URL。"""
+        if image_path.startswith("http://") or image_path.startswith("https://"):
+            import urllib.request
+            with urllib.request.urlopen(image_path) as resp:
+                return base64.b64encode(resp.read()).decode("utf-8")
         with open(image_path, "rb") as f:
             return base64.b64encode(f.read()).decode("utf-8")
 
@@ -99,7 +103,7 @@ def render_page():
             if not item:
                 continue
             image_path = item.get("image_path", "")
-            if not image_path or not os.path.exists(image_path):
+            if not image_path:
                 continue
             img_b64 = get_image_base64(image_path)
             valid_items.append((item, img_b64))
@@ -591,7 +595,7 @@ def render_page():
                             if item_id and item_id in wardrobe_dict:
                                 w_item = wardrobe_dict[item_id]
                                 img_path = w_item.get("image_path")
-                                if img_path and os.path.exists(img_path):
+                                if img_path:
                                     img_b64 = get_image_base64(img_path)
                                     card_html = build_item_flex_card(w_item, img_b64)
                                     st.markdown(f"- {desc}<br>{card_html}", unsafe_allow_html=True)
@@ -894,7 +898,7 @@ def render_page():
                 col_img, col_form = st.columns([1, 2])
                 with col_img:
                     image_path = item.get("image_path")
-                    if image_path and os.path.exists(image_path):
+                    if image_path:
                         st.image(image_path, use_container_width=True)
                     else:
                         st.info("暂无照片")
@@ -929,17 +933,10 @@ def render_page():
                             "color": new_color,
                             "material": new_material,
                         }
+                        image_bytes_to_save = None
                         if new_image is not None:
-                            image_bytes = new_image.getvalue()
-                            existing_path = item.get("image_path", "")
-                            if existing_path and os.path.isdir(os.path.dirname(existing_path)):
-                                save_path = existing_path
-                            else:
-                                save_path = os.path.join(svc.image_dir, f"{item_id}.jpg")
-                            with open(save_path, "wb") as f:
-                                f.write(image_bytes)
-                            update_data["image_path"] = save_path
-                        svc.update_item(item_id, update_data)
+                            image_bytes_to_save = new_image.getvalue()
+                        svc.update_item(item_id, update_data, image_bytes=image_bytes_to_save)
                         st.session_state.editing_item_id = None
                         st.toast("单品信息已更新！✨", icon="✅")
                         time.sleep(0.3)
@@ -982,7 +979,7 @@ def render_page():
                         icon = icon_map.get(item.get("category", ""), "👗")
                         image_path = item.get("image_path")
                         with cols[i]:
-                            if image_path and os.path.exists(image_path):
+                            if image_path:
                                 img_b64 = get_image_base64(image_path)
                                 st.markdown(build_wardrobe_card(item, img_b64, icon), unsafe_allow_html=True)
                             else:
