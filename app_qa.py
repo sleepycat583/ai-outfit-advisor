@@ -9,7 +9,6 @@ import config_data as config
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_community.embeddings import DashScopeEmbeddings
 from rag import RagService, ConsoleLoggingHandler, FALLBACK_MESSAGE
-from user_service import UserService
 from vector_store_service import VectorWardrobeService
 from wardrobe_service import WardrobeService
 
@@ -450,82 +449,6 @@ def render_page():
     if "weekly_plan" not in st.session_state:
         st.session_state["weekly_plan"] = None
 
-    with st.sidebar:
-        st.header("👤 我的穿搭档案")
-
-        user_service = UserService()
-        saved_profile = user_service.get_profile(user_id)
-
-        if "user_gender" not in st.session_state:
-            st.session_state["user_gender"] = saved_profile.get("gender", "女生")
-        if "user_style" not in st.session_state:
-            st.session_state["user_style"] = saved_profile.get("style", "日常休闲")
-        if "user_body" not in st.session_state:
-            st.session_state["user_body"] = saved_profile.get("body", "")
-        if "user_city" not in st.session_state:
-            st.session_state["user_city"] = saved_profile.get("city", "北京")
-        if "_last_saved_profile" not in st.session_state:
-            st.session_state["_last_saved_profile"] = saved_profile.copy()
-
-        gender_options = ["女生", "男生"]
-        gender_labels = {"女生": "👩 女生", "男生": "👨 男生"}
-        user_gender = st.selectbox(
-            "选择你的性别", gender_options, key="user_gender", format_func=lambda v: gender_labels.get(v, v)
-        )
-        style_options = ["日常休闲", "职场通勤", "甜美可爱", "运动风", "极简冷淡风"]
-        style_labels = {
-            "日常休闲": "🧢 日常休闲",
-            "职场通勤": "💼 职场通勤",
-            "甜美可爱": "🎀 甜美可爱",
-            "运动风": "🏃 运动风",
-            "极简冷淡风": "🖤 极简冷淡风",
-        }
-        user_style = st.selectbox(
-            "偏好的穿搭风格",
-            style_options,
-            key="user_style",
-            format_func=lambda v: style_labels.get(v, v),
-        )
-        user_body = st.text_input(
-            "📏 输入你的身高/体重 (选填)", key="user_body", placeholder="例如：165cm / 50kg"
-        )
-        user_city = st.text_input("📍 所在城市", key="user_city", placeholder="例如：上海、广州、成都")
-
-        current_profile = {
-            "gender": user_gender,
-            "style": user_style,
-            "body": user_body,
-            "city": user_city,
-        }
-        if st.session_state.get("_last_saved_profile") != current_profile:
-            user_service.save_profile(user_id, current_profile)
-            st.session_state["_last_saved_profile"] = current_profile.copy()
-
-        with st.expander("🛠️ 开发者模式 (调试信息)", expanded=False):
-            st.text(f"Session ID: {st.session_state['session_id']}")
-
-        st.markdown('<div class="cozy-divider"></div>', unsafe_allow_html=True)
-        if st.sidebar.button("🔄 重置系统与服务", use_container_width=True):
-            # 只清空应用状态，保留登录态（authenticated / user_id / username）
-            for key in ("message", "session_id", "wardrobe_draft", "weekly_plan",
-                        "vector_wardrobe", "rag", "editing_item_id"):
-                st.session_state.pop(key, None)
-            st.success("服务已重置，正在重新加载...")
-            st.rerun()
-
-        if st.sidebar.button("🗑️ 清空对话历史", use_container_width=True):
-            from history import FileChatMessageHistory
-            from config_data import CHAT_HISTORY_DIR
-
-            FileChatMessageHistory(
-                session_id=st.session_state["session_id"],
-                storage_path=CHAT_HISTORY_DIR,
-            ).clear()
-            st.session_state["message"] = [{"role": "assistant", "content": "你好，有什么可以帮助你？"}]
-            st.toast("对话历史已清空", icon="🗑️")
-            time.sleep(0.3)
-            st.rerun()
-
     tab_chat, tab_wardrobe = st.tabs(["💬 穿搭顾问", "👗 智能衣橱"])
 
     with tab_chat:
@@ -546,10 +469,10 @@ def render_page():
             else:
                 with st.status("📅 小衣正在为您筹备一周穿搭...", expanded=True) as status:
                     user_profile = {
-                        "gender": user_gender,
-                        "style": user_style,
-                        "body": user_body,
-                        "city": user_city,
+                        "gender": st.session_state.get("user_gender", "女生"),
+                        "style": st.session_state.get("user_style", "日常休闲"),
+                        "body": st.session_state.get("user_body", ""),
+                        "city": st.session_state.get("user_city", ""),
                     }
                     plan = st.session_state["rag"].generate_weekly_plan(
                         user_profile=user_profile,
@@ -657,10 +580,10 @@ def render_page():
                         response = st.session_state["rag"].invoke(
                             {
                                 "input": final_prompt,
-                                "gender": user_gender,
-                                "style": user_style,
-                                "body": user_body,
-                                "city": user_city,
+                                "gender": st.session_state.get("user_gender", "女生"),
+                                "style": st.session_state.get("user_style", "日常休闲"),
+                                "body": st.session_state.get("user_body", ""),
+                                "city": st.session_state.get("user_city", ""),
                                 "wardrobe": wardrobe_text,
                                 "current_date": datetime.datetime.now().strftime("%Y年%m月%d日"),
                             },

@@ -92,7 +92,7 @@ class ConsoleLoggingHandler(BaseCallbackHandler):
         print(f"📄 [工具结果] {str(output)[:200]}...", flush=True)
 
     def on_agent_finish(self, finish, **kwargs):
-        print("✅ [回答完成] 穿搭建议已生成", flush=True)
+        print("[DONE] 穿搭建议已生成", flush=True)
         print("-" * 40, flush=True)
 
 
@@ -202,10 +202,10 @@ class RagService(object):
         wardrobe_items: list[dict],
         status_container=None,
     ) -> list[dict]:
-        gender = user_profile.get("gender", "")
-        style = user_profile.get("style", "")
-        body = user_profile.get("body", "")
-        city = user_profile.get("city", "")
+        gender = user_profile.get("gender", "未设置")
+        style = user_profile.get("style", "未设置")
+        body = user_profile.get("body", "") or "未设置"
+        city = user_profile.get("city", "未设置") or "未设置"
 
         # Step 1: 一次性获取未来一周天气
         if status_container:
@@ -284,10 +284,7 @@ class RagService(object):
 
         def get_history(session_id: str):
             """根据 session_id 获取历史记录"""
-            return FileChatMessageHistory(
-                session_id=session_id,
-                storage_path=config.CHAT_HISTORY_DIR,
-            )
+            return FileChatMessageHistory(session_id=session_id)
 
         # 1. 创建工具
         search_tool = Tool(

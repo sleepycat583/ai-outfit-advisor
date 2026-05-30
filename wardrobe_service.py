@@ -163,13 +163,13 @@ class WardrobeService:
         try:
             parsed = json.loads(cleaned_text)
         except json.JSONDecodeError:
-            print("⚠️ VLM 返回内容无法解析为 JSON，已使用兜底默认值。")
+            print("[WARN] VLM 返回内容无法解析为 JSON，已使用兜底默认值。")
             return fallback
 
         if isinstance(parsed, dict):
             parsed = [parsed]
         if not isinstance(parsed, list):
-            print("⚠️ VLM 返回内容不是预期的 JSON 结构，已使用兜底默认值。")
+            print("[WARN] VLM 返回内容不是预期的 JSON 结构，已使用兜底默认值。")
             return fallback
 
         normalized: list[dict] = []
@@ -183,7 +183,7 @@ class WardrobeService:
             normalized.append(item)
 
         if not normalized:
-            print("⚠️ VLM 返回内容无法识别出有效单品，已使用兜底默认值。")
+            print("[WARN] VLM 返回内容无法识别出有效单品，已使用兜底默认值。")
             return fallback
 
         return normalized
