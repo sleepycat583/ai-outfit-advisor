@@ -131,10 +131,10 @@ CREATE TABLE kb_documents (
     md5 TEXT NOT NULL,
     created_at TEXT
 );
-```
+
 
 进入 Storage 菜单，创建一个名为 wardrobe-images 的 Bucket（存储桶），并将其设置为 Public（公开），以便网页端能够正常加载衣橱图片。
-
+```
 第三步、配置环境变量
 
 将项目根目录下的 .env.example 复制并重命名为 .env。填入你在阿里云申请的 DashScope 秘钥，以及刚才创建的 Supabase 的连接信息：
@@ -145,7 +145,7 @@ DASHSCOPE_API_KEY="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
 # Supabase 项目 URL 和匿名 API Key (在 Project Settings -> API 中获取)
 SUPABASE_URL="[https://xxxxxxxxxxxx.supabase.co](https://xxxxxxxxxxxx.supabase.co)"
 SUPABASE_KEY="eyJhbGciOiJIUzI1NiIsInR5c......"
-
+```
 
 第四步、启动服务
 
