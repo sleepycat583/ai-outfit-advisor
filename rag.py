@@ -97,11 +97,13 @@ class ConsoleLoggingHandler(BaseCallbackHandler):
 
 
 class RagService(object):
-    def __init__(self, vector_wardrobe: Optional[VectorWardrobeService] = None):
+    def __init__(self, vector_wardrobe: Optional[VectorWardrobeService] = None, user_id: str = ""):
         self.vector_wardrobe = vector_wardrobe
+        self.user_id = user_id
 
         self.vector_service = VectorStoreService(
-            embedding=DashScopeEmbeddings(model=config.EMBEDDING_MODEL_NAME)
+            embedding=DashScopeEmbeddings(model=config.EMBEDDING_MODEL_NAME),
+            user_id=user_id,
         )
 
         self.prompt_template = ChatPromptTemplate.from_messages(

@@ -23,11 +23,8 @@ CHAT_HISTORY_DIR = "./chat_history"
 EMBEDDING_MODEL_NAME = "text-embedding-v4"
 DEFAULT_OPERATOR = "小曹"
 
-md5_path = "./md5.text"
-
 # Chroma 向量库配置
 persist_directory = "./data/chroma"
-collection_name = "knowledge_base"
 
 # 文本切分配置
 chunk_size = 800

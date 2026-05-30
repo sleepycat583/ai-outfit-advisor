@@ -5,26 +5,20 @@ import config_data as config
 
 
 class VectorStoreService(object):
-    def __init__(self, embedding):
-        """
-        :param embedding: 嵌入模型的传入
-        """
+    def __init__(self, embedding, user_id: str = ""):
         self.embedding = embedding
+        self.user_id = user_id
 
-        persist_directory = config.persist_directory
-        needs_rebuild = (not os.path.isdir(persist_directory)) or (not any(os.scandir(persist_directory)))
-        if needs_rebuild:
-            print("⚠️ [警告] Chroma 数据库目录缺失或为空，正在触发自愈重建", flush=True)
-            os.makedirs(persist_directory, exist_ok=True)
+        persist_dir = os.path.join(config.persist_directory, user_id, "kb") if user_id else os.path.join(config.persist_directory, "kb")
+        collection_name = f"kb_{user_id}" if user_id else "kb_default"
+
+        os.makedirs(persist_dir, exist_ok=True)
 
         self.vector_store = Chroma(
-            collection_name=config.collection_name,
+            collection_name=collection_name,
             embedding_function=self.embedding,
-            persist_directory=persist_directory,
+            persist_directory=persist_dir,
         )
-
-        if needs_rebuild and hasattr(self.vector_store, "persist"):
-            self.vector_store.persist()
 
     def get_retriever(self):
         """返回向量库检索器，方便加入 Chain"""

@@ -26,6 +26,10 @@ if not st.session_state["authenticated"]:
 
     st.markdown("""
     <style>
+    /* ===== 页面背景：与问答界面一致的暖米色 ===== */
+    [data-testid="stAppViewContainer"] {
+        background: #FBF9F6;
+    }
     .auth-container {
         max-width: 420px;
         margin: 8vh auto 0;
@@ -47,6 +51,9 @@ if not st.session_state["authenticated"]:
         margin-bottom: 1.8rem;
     }
     @media (prefers-color-scheme: dark) {
+        [data-testid="stAppViewContainer"] {
+            background: #0d1117;
+        }
         .auth-container {
             background: #161b22;
             box-shadow: 0 8px 32px rgba(0,0,0,0.3);
@@ -55,11 +62,11 @@ if not st.session_state["authenticated"]:
         .auth-subtitle { color: #8b949e; }
     }
     </style>
-    """, unsafe_allow_html=True)
 
-    st.markdown('<div class="auth-container">', unsafe_allow_html=True)
-    st.markdown('<div class="auth-title">🧵 小衣 · AI穿搭顾问</div>', unsafe_allow_html=True)
-    st.markdown('<div class="auth-subtitle">你的私人穿搭主理人</div>', unsafe_allow_html=True)
+    <div class="auth-container">
+    <div class="auth-title">🧵 小衣 · AI穿搭顾问</div>
+    <div class="auth-subtitle">你的私人穿搭主理人</div>
+    """, unsafe_allow_html=True)
 
     tab_login, tab_register = st.tabs(["登录", "注册"])
 
@@ -110,17 +117,28 @@ import app_file_uploader
 st.sidebar.title("🧵 应用导航")
 st.sidebar.write(f"👤 {st.session_state['username']}")
 
-app_choice = st.sidebar.radio(
-    "选择功能",
-    ["📚 知识库管理", "💬 穿搭问答"],
-    help="选择你要使用的功能"
-)
+if "active_page" not in st.session_state:
+    st.session_state["active_page"] = "qa"
+
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    if st.button("💬 穿搭问答", use_container_width=True,
+                 type="primary" if st.session_state["active_page"] == "qa" else "secondary"):
+        st.session_state["active_page"] = "qa"
+        st.rerun()
+with col2:
+    if st.button("📚 知识库", use_container_width=True,
+                 type="primary" if st.session_state["active_page"] == "kb" else "secondary"):
+        st.session_state["active_page"] = "kb"
+        st.rerun()
+
+st.sidebar.divider()
 
 if st.sidebar.button("🚪 退出登录", use_container_width=True):
     st.session_state.clear()
     st.rerun()
 
-if app_choice == "📚 知识库管理":
+if st.session_state["active_page"] == "kb":
     app_file_uploader.render_page()
 else:
     app_qa.render_page()

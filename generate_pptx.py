@@ -664,7 +664,9 @@ add_text_box(s, Inches(0.8), Inches(6.0), Inches(11.7), Inches(0.3),
              "欢迎评委老师提问", Pt(13), TEXT_2, align=PP_ALIGN.CENTER)
 
 # ── Save ──
-out_path = "c:/Users/user/Desktop/项目1/小衣_比赛答辩.pptx"
+out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+os.makedirs(out_dir, exist_ok=True)
+out_path = os.path.join(out_dir, "小衣_比赛答辩.pptx")
 prs.save(out_path)
 print(f"OK PPTX saved: {out_path}")
 print(f"   Slides: {len(prs.slides)}")

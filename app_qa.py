@@ -433,7 +433,8 @@ def render_page():
 
     if "rag" not in st.session_state:
         st.session_state["rag"] = RagService(
-            vector_wardrobe=st.session_state["vector_wardrobe"]
+            vector_wardrobe=st.session_state["vector_wardrobe"],
+            user_id=user_id,
         )
 
     if "session_id" not in st.session_state:
