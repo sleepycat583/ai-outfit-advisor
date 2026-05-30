@@ -91,7 +91,7 @@ pip install -r requirements.txt
 前往 Supabase 官网 注册并创建一个新项目。
 
 进入 SQL Editor，执行以下建表语句，初始化你的云端数据库：
-
+```
 -- 1. 用户表
 CREATE TABLE users (
     id TEXT PRIMARY KEY,
@@ -101,14 +101,14 @@ CREATE TABLE users (
     created_at TEXT,
     profile TEXT DEFAULT '{}'
 );
-
+```
 -- 2. 聊天记录表
 CREATE TABLE chat_messages (
     session_id TEXT PRIMARY KEY,
     messages TEXT NOT NULL,
     updated_at TEXT
 );
-
+```
 -- 3. 衣橱单品表
 CREATE TABLE wardrobe_items (
     id TEXT PRIMARY KEY,
@@ -121,7 +121,7 @@ CREATE TABLE wardrobe_items (
     image_path TEXT DEFAULT '',
     created_at TEXT
 );
-
+```
 -- 4. 知识库记录表 (用于防重和恢复)
 CREATE TABLE kb_documents (
     id SERIAL PRIMARY KEY,
@@ -131,7 +131,7 @@ CREATE TABLE kb_documents (
     md5 TEXT NOT NULL,
     created_at TEXT
 );
-
+```
 
 进入 Storage 菜单，创建一个名为 wardrobe-images 的 Bucket（存储桶），并将其设置为 Public（公开），以便网页端能够正常加载衣橱图片。
 
