@@ -1,8 +1,14 @@
 👔 AI Outfit Advisor (智能穿搭顾问) V2.4
+在线 Demo：https://sleepycat-ai-outfit-advisor.streamlit.app
 
 一个面向大学生群体的智能穿搭决策与衣橱管理助手。本项目在最新版本中完成了全面云原生化升级，基于 Supabase 实现了多租户数据隔离与云端持久化。
 
 融合 Qwen-Max 大模型、多模态视觉大模型 (Qwen-VL)、RAG 本地知识库 (Chroma) 与 Agent 联网决策 (DuckDuckGo)，以“顶尖私人穿搭主理人”人设，提供图片识衣、数字衣橱管理、穿搭知识问答，以及基于天气的 7 天不重样周计划的完整 OOTD 解决方案。
+
+
+
+
+
 
 ✨ V2.4 核心大版本更新（云原生架构演进）
 
