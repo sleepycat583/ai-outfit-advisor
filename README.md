@@ -1,4 +1,5 @@
 👔 AI Outfit Advisor (智能穿搭顾问) V2.4
+
 在线 Demo：https://sleepycat-ai-outfit-advisor.streamlit.app
 
 一个面向大学生群体的智能穿搭决策与衣橱管理助手。本项目在最新版本中完成了全面云原生化升级，基于 Supabase 实现了多租户数据隔离与云端持久化。
