@@ -1,109 +1,173 @@
-👔 AI Outfit Advisor (智能穿搭顾问)
+👔 AI Outfit Advisor (智能穿搭顾问) V2.4
 
-V2.3 - 基于多模态大模型、多用户数据隔离与状态过滤算法的“智能衣橱”系统
+在线 Demo：https://sleepycat-ai-outfit-advisor.streamlit.app
 
-一个面向大学生群体的智能穿搭决策与衣橱管理助手。融合 Qwen-Max 大模型、多模态视觉大模型 (Qwen-VL)、RAG 本地知识库 (Chroma) 与 Agent 联网决策 (DuckDuckGo)，以“顶尖私人穿搭主理人”人设，提供多账户隔离、图片识衣、数字衣橱 CRUD 管理，以及基于天气的 7 天不重样周计划的完整 OOTD 解决方案。
+一个面向大学生群体的智能穿搭决策与衣橱管理助手。本项目在最新版本中完成了全面云原生化升级，基于 Supabase 实现了多租户数据隔离与云端持久化。
 
-✨ 核心亮点
+融合 Qwen-Max 大模型、多模态视觉大模型 (Qwen-VL)、RAG 本地知识库 (Chroma) 与 Agent 联网决策 (DuckDuckGo)，以“顶尖私人穿搭主理人”人设，提供图片识衣、数字衣橱管理、穿搭知识问答，以及基于天气的 7 天不重样周计划的完整 OOTD 解决方案。
 
-引擎 / 模块
 
-核心能力
 
-🔐 多账户与数据隔离
+<img width="960" height="502" alt="面试_2x_small" src="https://github.com/user-attachments/assets/7d04c224-532d-4da5-826c-8f43cbb87d90" />
 
-内置完备的注册/登录系统，基于 SQLite (users.db) 与加盐哈希保障密码安全。每个用户拥有独立的穿搭档案与衣橱数据库，实现数据100%隔离。
 
-🧠 Agent 联网决策
 
-动态捕获用户的所在城市，自主调用 DuckDuckGo 实时搜索未来天气，结合 LangChain 全生命周期 Callback 系统实现终端透明日志。
 
-📚 RAG 本地知识库
+✨ V2.4 核心大版本更新（云原生架构演进）
 
-基于 Chroma 向量数据库，覆盖洗护养护、尺码推荐、颜色搭配、面试等四大领域，支持 .txt 文档一键上传与 MD5 去重。
+核心模块
 
-📸 多模态智能识衣
+升级亮点说明
 
-支持上传衣服照片，利用 VLM 大模型 (qwen-vl-max) 自动提取单品品类、细分颜色、面料材质、适用季节并完成结构化输出入库。
+☁️ 全量数据上云 (Supabase)
 
-👗 状态过滤周计划
+彻底解决 Streamlit Cloud 容器重启导致的数据丢失痛点。用户档案、衣橱单品、聊天记录、知识库 MD5 去重记录全面迁移至 Supabase PostgreSQL；图片资产迁移至 Supabase Storage。
 
-引入“洗涤限制状态机”算法，利用大模型原生 with_structured_output 特性，单次并发生成 7 天统筹规划，按天循环过滤已消耗单品，避免推荐连续重复。
+🔐 多租户与数据 100% 隔离
 
-💾 SQLite 持久化存储
+完善的注册/登录系统。每个用户的衣橱数据、对话历史、甚至专属的 Chroma 向量检索空间均通过 user_id 严格隔离，真正实现千人千面。
 
-抛弃传统的 JSON 文件，升级为 SQLite 本地数据库，通过开启 WAL 模式与防锁重试机制，完美解决高并发下衣橱数据的读写冲突。
+🌱 种子知识自动导入
 
-🔄 CSV 数据管理
+新增 seeds/ 目录。系统启动时，自动将预置的“大厂面试穿搭、色彩搭配、洗涤养护”等基础知识库写入向量数据库，开箱即用。
 
-支持将个人衣橱一键导出为标准的 CSV 备份文件，并提供“追加”或“覆盖”双模式的 CSV 批量导入功能。
+📝 文本极速粘贴入库
+
+知识库管理不仅支持 .txt 文件上传，新增“直接粘贴文本”功能，并结合云端 MD5 校验实现防重复导入。
+
+🌟 核心功能矩阵
+
+Agent 联网决策：动态捕获用户所在城市，自主调用 DuckDuckGo 实时搜索未来天气，并结合 LangChain Callback 输出终端透明日志。
+
+RAG 穿搭知识库：基于 Chroma 向量检索，覆盖洗护、尺码、色彩、面试四大领域，利用系统预设规则将检索结果无缝注入 Prompt。
+
+多模态智能识衣：上传照片，VLM 大模型 (qwen-vl-max) 自动提取：品类、细分类、颜色、面料、适用季节，并结构化输出入库。
+
+状态机周计划：大模型 with_structured_output 结构化输出 7 天穿搭统筹，内置“洗涤与轮换约束规则”，避免连续重复。
 
 🏗️ 系统流程架构
 ```
-[用户鉴权 (app_main)] ──► [注册/登录] ──► [进入专属空间 (user_id)]
+[用户鉴权 (app_main)] ──► [注册/登录] ──► [分配隔离沙箱 (user_id)]
                                             │
        ┌────────────────────────────────────┴────────────────────────────────────┐
        ▼                                                                         ▼
 [💬 穿搭问答端 (RAG + Agent)]                                            [👗 智能衣橱端]
        │                                                                         │
        ├─► 📅 生成本周穿搭计划                                                   ├─► [上传照片] ─► [VLM 智能识衣]
-       │       ├─► 1. 联网查询属地本周天气                                       │
-       │       ├─► 2. 检索 Chroma 搭配/修饰知识库                                ├─► [手动录入表单]
-       │       └─► 3. 7天状态过滤循环算法                                        │
+       │       ├─► 1. 联网查询属地未来天气                                       │
+       │       ├─► 2. 检索 Chroma 获取穿搭法则                                   ├─► [手动录入表单]
+       │       └─► 3. 约束算法生成 7天 JSON                                      │
        │                                                                         ├─► [CSV 批量导入/导出备份]
        ▼                                                                         ▼
-[流式渲染穿搭方案 & 搭配单品卡片]                                        [保存至 SQLite (wardrobe.db)]
-
+[流式渲染穿搭方案 & 搭配单品卡片]                                        [保存至 Supabase 云端数据库]
+                                                                         [图片上传至 Supabase Storage]
 ```
-📂 项目结构
+
+📂 项目目录结构
 ```
 ai-outfit-advisor/
-├── app_main.py                 # 🚀 主入口：鉴权路由（登录/注册）及页面分发
-├── app_qa.py                   # 穿搭服务：多模态穿搭问答 & 智能衣橱管理（Streamlit UI）
-├── app_file_uploader.py        # 知识库管理：.txt 文档上传与 Chroma 向量化
-├── user_service.py             # 用户服务：账号注册、登录校验、密码哈希加盐与档案存储
-├── wardrobe_service.py         # 衣橱服务：VLM 识衣、SQLite CRUD、CSV 导入导出
-├── rag.py                      # RAG 核心：Agent 构建、天气搜索工具、7天结构化规划算法
-├── history.py                  # 会话历史：并发安全的文件锁持久化读写
-├── vector_store_service.py     # 向量检索服务封装 (支持独立衣橱的语义检索)
-├── knowledge_base.py           # 知识库引擎：Chroma 存储 + MD5 去重
-├── prompts.py                  # 集中管理系统级 Prompt (RAG, Weekly Plan, VLM 等)
-├── config_data.py              # 全局配置：模型名称、切分参数、数据库路径等
-├── generate_pptx.py            # 工具脚本：一键生成项目答辩 PPTX
-├── requirements.txt            # Python 依赖清单
-├── .env.example                # 环境变量配置模板
-├── chat_history/               # 存放各用户的多轮对话历史 (JSON 文件锁管理)
-├── data/
-│   ├── users.db                # [核心] 用户鉴权与档案主数据库 (SQLite)
-│   ├── chroma/                 # Chroma 向量库持久化目录 (包含公共知识库与个人衣橱索引)
-│   └── {user_id}/              # 按照 user_id 隔离的用户私人目录
-│       ├── wardrobe.db         # 用户个人专属衣橱数据库 (SQLite)
-│       └── wardrobe_images/    # 用户上传的衣服压缩图片存储目录
-└── *.txt                       # 穿搭知识库原始语料（如洗涤养护、面试指南等）
+├── app_main.py                 # 🚀 主入口：全局路由、登录/注册页面、侧边栏管理
+├── app_qa.py                   # 穿搭服务：对话流式渲染、Agent 调用、智能衣橱交互
+├── app_file_uploader.py        # 知识库管理：支持 TXT 上传与纯文本粘贴、MD5 云端去重
+├── rag.py                      # RAG 核心：Agent 构建、天气搜索工具、7天结构化规划
+├── user_service.py             # 用户服务：密码哈希加盐验证，接驳 Supabase
+├── wardrobe_service.py         # 衣橱服务：VLM 识衣，接驳 Supabase 增删改查与图片上传
+├── knowledge_base.py           # 知识库引擎：Chroma 构建、seeds 自动导入、Supabase 恢复
+├── vector_store_service.py     # 向量服务：隔离用户的知识库与衣橱语义检索
+├── history.py                  # 会话历史：基于 Supabase PostgreSQL 的云端漫游记录
+├── supabase_config.py          # ☁️ 云端配置：Supabase 客户端单例与环境秘钥解析
+├── prompts.py                  # Prompt 集中营：人设、Agent 约束、输出格式控制
+├── config_data.py              # 全局配置：模型名称、切分参数等
+├── seeds/                      # 🌱 种子知识库目录（系统启动时自动导入其中的 .txt）
+└── .env.example                # 环境变量配置模板
+
 ```
+🚀 快速部署指南（新手向）
 
-📦 快速开始
+为了保障数据不丢失，本项目现已全面接入 Supabase，请按照以下步骤进行配置：
 
-第一步、安装依赖
+第一步、拉取代码与安装依赖
+
+首先，克隆项目到本地并安装依赖环境：
 
 git clone [https://github.com/sleepycat583/ai-outfit-advisor.git](https://github.com/sleepycat583/ai-outfit-advisor.git)
 cd ai-outfit-advisor
 pip install -r requirements.txt
 
 
-第二步、配置环境变量
-将项目根目录下的 .env.example 复制并重命名为 .env，并填入你的模型 API 密钥：
+第二步、配置 Supabase 云端数据库（免费）
 
-DASHSCOPE_API_KEY="your-api-key-here"
+前往 Supabase 官网 注册并创建一个新项目。
+
+进入 SQL Editor，执行以下建表语句，初始化你的云端数据库：
+```
+-- 1. 用户表
+CREATE TABLE users (
+    id TEXT PRIMARY KEY,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    salt TEXT NOT NULL,
+    created_at TEXT,
+    profile TEXT DEFAULT '{}'
+);
+```
+-- 2. 聊天记录表
+CREATE TABLE chat_messages (
+    session_id TEXT PRIMARY KEY,
+    messages TEXT NOT NULL,
+    updated_at TEXT
+);
+```
+-- 3. 衣橱单品表
+CREATE TABLE wardrobe_items (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    category TEXT NOT NULL,
+    sub_category TEXT DEFAULT '',
+    color TEXT DEFAULT '',
+    material TEXT DEFAULT '',
+    season TEXT DEFAULT '',
+    image_path TEXT DEFAULT '',
+    created_at TEXT
+);
+```
+-- 4. 知识库记录表 (用于防重和恢复)
+CREATE TABLE kb_documents (
+    id SERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    content TEXT NOT NULL,
+    md5 TEXT NOT NULL,
+    created_at TEXT
+);
 
 
-第三步、启动服务
+进入 Storage 菜单，创建一个名为 wardrobe-images 的 Bucket（存储桶），并将其设置为 Public（公开），以便网页端能够正常加载衣橱图片。
+```
+第三步、配置环境变量
 
-# 请必须通过主入口文件启动，以确保激活登录系统
+将项目根目录下的 .env.example 复制并重命名为 .env。填入你在阿里云申请的 DashScope 秘钥，以及刚才创建的 Supabase 的连接信息：
+
+# 阿里云百炼大模型 API Key
+DASHSCOPE_API_KEY="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
+
+# Supabase 项目 URL 和匿名 API Key (在 Project Settings -> API 中获取)
+SUPABASE_URL="[https://xxxxxxxxxxxx.supabase.co](https://xxxxxxxxxxxx.supabase.co)"
+SUPABASE_KEY="eyJhbGciOiJIUzI1NiIsInR5c......"
+```
+
+第四步、启动服务
+
+环境配置完毕后，通过 Streamlit 启动项目主入口：
+
 streamlit run app_main.py
 
 
-(注意：知识库管理功能已集成在登录后的侧边栏导航中，无需单独启动)
+💡 提示： 首次启动时，终端会提示 [种子导入] 已自动导入 x 份基础穿搭知识，此时你已经可以直接体验 RAG 问答了！
+
+🤝 开发者模式建议
+
+如果你需要重置系统的上下文状态（例如开发调试时卡顿），可以点击侧边栏最下方的 🔄 重置系统与服务 按钮。这会清空当前应用内存状态并重新拉取云端数据，但不会让你退出登录。
 
 📝 迭代日志 (Changelog)
 
