@@ -6,20 +6,16 @@ import json
 
 from pydantic import BaseModel, Field
 
-from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_core.runnables import RunnableLambda
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import Tool
 from history import FileChatMessageHistory
 from vector_store_service import VectorStoreService, VectorWardrobeService
 from prompts import RAG_SYSTEM_PROMPT, WEEKLY_PLAN_PROMPT
 from langchain_community.embeddings import DashScopeEmbeddings
 import config_data as config
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_community.chat_models.tongyi import ChatTongyi
 from langchain_community.tools import DuckDuckGoSearchRun
-from langchain.agents import create_tool_calling_agent, AgentExecutor
 from langchain.tools.retriever import create_retriever_tool
 
 
@@ -39,6 +35,9 @@ class WeeklyPlan(BaseModel):
 
 
 FALLBACK_MESSAGE = "小衣当前思考超时，请稍后再试"
+LANGGRAPH_IMPORT_ERROR_MESSAGE = (
+    "LangGraph 依赖不可用或版本不兼容，请安装与当前 LangChain 生态兼容的 LangGraph 版本后再试。"
+)
 
 
 class ConsoleLoggingHandler(BaseCallbackHandler):
@@ -47,6 +46,28 @@ class ConsoleLoggingHandler(BaseCallbackHandler):
     def __init__(self):
         super().__init__()
         self._chain_depth = 0
+
+    def _extract_latest_human_text(self, value):
+        """从 LangChain/LangGraph 输入结构中提取最后一条用户文本，避免打印完整 messages 状态。"""
+        if isinstance(value, HumanMessage):
+            return value.content
+        if isinstance(value, BaseMessage):
+            return value.content
+        if isinstance(value, dict):
+            if "input" in value:
+                return self._extract_latest_human_text(value["input"])
+            if "messages" in value:
+                return self._extract_latest_human_text(value["messages"])
+            return str(value)
+        if isinstance(value, list):
+            for msg in reversed(value):
+                if isinstance(msg, HumanMessage) and msg.content:
+                    return msg.content
+            for msg in reversed(value):
+                if isinstance(msg, BaseMessage) and msg.content:
+                    return msg.content
+            return ""
+        return str(value)
 
     def _format_tool_input(self, tool_input):
         if isinstance(tool_input, dict):
@@ -61,20 +82,8 @@ class ConsoleLoggingHandler(BaseCallbackHandler):
         if self._chain_depth == 1 and not ConsoleLoggingHandler._boot_logged:
             print("🚀 [系统启动] 穿搭决策大脑已就绪", flush=True)
             ConsoleLoggingHandler._boot_logged = True
-        if isinstance(inputs, dict):
-            user_input = inputs.get("input", inputs)
-        else:
-            user_input = inputs
-        if isinstance(user_input, dict):
-            user_input = user_input.get("input", user_input)
-        if isinstance(user_input, BaseMessage):
-            user_input = user_input.content
-        elif isinstance(user_input, list):
-            for msg in reversed(user_input):
-                if isinstance(msg, BaseMessage) and msg.content:
-                    user_input = msg.content
-                    break
         if self._chain_depth == 1:
+            user_input = self._extract_latest_human_text(inputs)
             print(f"👤 [用户输入] {user_input}", flush=True)
 
     def on_chain_end(self, output, **kwargs):
@@ -106,16 +115,6 @@ class RagService(object):
             user_id=user_id,
         )
 
-        self.prompt_template = ChatPromptTemplate.from_messages(
-            [
-                ("system", RAG_SYSTEM_PROMPT),
-                ("system", "以下是你们的历史对话记录："),
-                MessagesPlaceholder(variable_name="history"),
-                ("user", "{input}"),
-                MessagesPlaceholder(variable_name="agent_scratchpad"),
-            ]
-        )
-
         self.chat_model = ChatTongyi(model=config.chat_model_name)
 
         self.chain = self.__get_chain()
@@ -141,7 +140,13 @@ class RagService(object):
 
     def stream(self, inputs: dict, config: Optional[dict] = None):
         try:
-            return self.chain.stream(self._prepare_inputs(inputs), config=config)
+            prepared_inputs = self._prepare_inputs(inputs)
+            answer = self._invoke_graph(prepared_inputs, config=config)
+
+            def _answer_stream():
+                yield answer
+
+            return _answer_stream()
         except Exception:
 
             def _fallback():
@@ -151,9 +156,98 @@ class RagService(object):
 
     def invoke(self, inputs: dict, config: Optional[dict] = None):
         try:
-            return self.chain.invoke(self._prepare_inputs(inputs), config=config)
+            prepared_inputs = self._prepare_inputs(inputs)
+            return self._invoke_graph(prepared_inputs, config=config)
         except Exception:
             return FALLBACK_MESSAGE
+
+    def _get_langgraph_factory(self):
+        try:
+            from langgraph.prebuilt import create_react_agent
+
+            return create_react_agent
+        except Exception as exc:
+            raise RuntimeError(LANGGRAPH_IMPORT_ERROR_MESSAGE) from exc
+
+    def _normalize_config(self, config: Optional[dict] = None) -> dict:
+        config = dict(config or {})
+        configurable = dict(config.get("configurable") or {})
+        session_id = configurable.get("session_id") or configurable.get("thread_id")
+        if not session_id:
+            session_id = f"chat_session_{self.user_id}" if self.user_id else "default_session"
+        configurable.setdefault("thread_id", session_id)
+        configurable.setdefault("session_id", session_id)
+        config["configurable"] = configurable
+        return config
+
+    def _build_system_prompt(self, inputs: dict) -> str:
+        prompt_inputs = {
+            "current_date": inputs.get("current_date", datetime.datetime.now().strftime("%Y年%m月%d日")),
+            "gender": inputs.get("gender", "未设置"),
+            "style": inputs.get("style", "未设置"),
+            "body": inputs.get("body", ""),
+            "city": inputs.get("city", ""),
+            "wardrobe": inputs.get("wardrobe", "暂无已录入的单品（请先去「智能衣橱」拍照上传）"),
+        }
+        return RAG_SYSTEM_PROMPT.format(**prompt_inputs)
+
+    def _get_session_history(self, config: Optional[dict]) -> tuple[str, list[BaseMessage]]:
+        normalized_config = self._normalize_config(config)
+        session_id = normalized_config["configurable"]["session_id"]
+        try:
+            history = FileChatMessageHistory(session_id=session_id)
+            return session_id, history.messages
+        except Exception as exc:
+            print(f"[WARN] 聊天历史读取不可用，已使用空历史：{exc}", flush=True)
+            return session_id, []
+
+    def _extract_answer_from_state(self, state) -> str:
+        messages = []
+        if isinstance(state, dict):
+            messages = state.get("messages", [])
+        elif isinstance(state, list):
+            messages = state
+
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage):
+                content = msg.content
+                if isinstance(content, str):
+                    return content
+                if isinstance(content, list):
+                    parts = []
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            parts.append(part.get("text", ""))
+                        else:
+                            parts.append(str(part))
+                    return "".join(parts).strip()
+                return str(content)
+        return FALLBACK_MESSAGE
+
+    def _invoke_graph(self, inputs: dict, config: Optional[dict] = None) -> str:
+        normalized_config = self._normalize_config(config)
+        session_id, history_messages = self._get_session_history(normalized_config)
+        system_prompt = self._build_system_prompt(inputs)
+
+        graph_inputs = {
+            "messages": [
+                SystemMessage(content=system_prompt),
+                SystemMessage(content="以下是你们的历史对话记录："),
+                *history_messages,
+                HumanMessage(content=inputs.get("input", "")),
+            ]
+        }
+
+        state = self.chain.invoke(graph_inputs, config=normalized_config)
+        answer = self._extract_answer_from_state(state)
+
+        try:
+            FileChatMessageHistory(session_id=session_id).add_messages(
+                [HumanMessage(content=inputs.get("input", "")), AIMessage(content=answer)]
+            )
+        except Exception as exc:
+            print(f"[WARN] 聊天历史写入不可用，已跳过持久化：{exc}", flush=True)
+        return answer
 
     def _weather_search(self, query: str) -> str:
         current_year = datetime.datetime.now().year
@@ -279,12 +373,9 @@ class RagService(object):
             return data.get("days", data if isinstance(data, list) else [])
 
     def __get_chain(self):
-        """获取最终的执行链"""
+        """获取 LangGraph ReAct Agent。"""
         retriever = self.vector_service.get_retriever()
-
-        def get_history(session_id: str):
-            """根据 session_id 获取历史记录"""
-            return FileChatMessageHistory(session_id=session_id)
+        create_react_agent = self._get_langgraph_factory()
 
         # 1. 创建工具
         search_tool = Tool(
@@ -303,31 +394,7 @@ class RagService(object):
             "当用户询问关于服装洗涤、尺码推荐、颜色搭配等通用穿搭知识时，必须使用此工具。",
         )
         tools = [search_tool, retriever_tool]
-
-        # 2. 构建 Agent
-        agent = create_tool_calling_agent(self.chat_model, tools, self.prompt_template)
-        agent_executor = AgentExecutor(
-            agent=agent,
-            tools=tools,
-            verbose=False,
-        )
-
-        # 3. 包装为支持历史记录的链
-        conversation_chain = RunnableWithMessageHistory(
-            agent_executor,
-            get_history,
-            input_messages_key="input",
-            history_messages_key="history",
-        )
-
-        # 4. 提取 output，保持与上游（app_qa.py 的 typewriter_stream）的字符串兼容性
-        def extract_output(data):
-            if isinstance(data, dict):
-                return data.get("output", "")
-            return str(data)
-
-        chain = conversation_chain | RunnableLambda(extract_output)
-        return chain
+        return create_react_agent(self.chat_model, tools)
 
 
 if __name__ == "__main__":

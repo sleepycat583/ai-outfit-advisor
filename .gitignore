@@ -219,9 +219,27 @@ data/chroma/
 data/wardrobe.json
 data/wardrobe.csv
 data/wardrobe_images/
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+*.lock
+**/chroma/
+**/wardrobe_images/
+**/md5.text
+data/**/*.jpg
+data/**/*.jpeg
+data/**/*.png
+data/**/*.webp
 
 # GitHub Copilot CLI local config
 .claude/
+
+# Cline local context rules
+.clinerules
 
 #md5.text
 md5.txt
