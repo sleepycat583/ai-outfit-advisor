@@ -570,7 +570,6 @@ def render_page():
 
             with st.chat_message("assistant"):
                 with st.status("小衣正在为您精心搭配...", expanded=True) as status:
-                    handler = HumanizedStatusHandler()
                     try:
                         # 格式化衣橱数据供 Agent 优先使用
                         if wardrobe_items:
@@ -586,7 +585,8 @@ def render_page():
                         else:
                             wardrobe_text = "暂无已录入的单品（请先去「智能衣橱」拍照上传）"
 
-                        response = st.session_state["rag"].invoke(
+                        res = FALLBACK_MESSAGE
+                        for event in st.session_state["rag"].stream_events(
                             {
                                 "input": final_prompt,
                                 "gender": st.session_state.get("user_gender", "女生"),
@@ -598,11 +598,18 @@ def render_page():
                             },
                             config={
                                 "configurable": {"session_id": st.session_state["session_id"]},
-                                "callbacks": [ConsoleLoggingHandler(), handler],
+                                "callbacks": [ConsoleLoggingHandler()],
                             },
-                        )
-                        res = response
-                        status.update(label="搭配完成！✨", state="complete", expanded=False)
+                        ):
+                            event_type = event.get("type")
+                            if event_type == "status":
+                                status.update(label=event.get("label", "小衣正在思考中..."), expanded=True)
+                            elif event_type == "answer":
+                                res = event.get("content", FALLBACK_MESSAGE)
+                                status.update(label="搭配完成！✨", state="complete", expanded=False)
+                            elif event_type == "error":
+                                res = event.get("content", FALLBACK_MESSAGE)
+                                status.update(label="⚠️ 小衣思考超时，请稍后再试", state="error", expanded=False)
                     except Exception:
                         res = FALLBACK_MESSAGE
                         status.update(label="⚠️ 小衣思考超时，请稍后再试", state="error", expanded=False)

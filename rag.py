@@ -40,6 +40,12 @@ LANGGRAPH_IMPORT_ERROR_MESSAGE = (
 )
 
 
+TOOL_EVENT_LABELS = {
+    "weather_search": ("🌤️", "正在观测天象", "查询天气"),
+    "knowledge_base_search": ("📚", "正在翻阅时尚秘籍", "检索穿搭知识"),
+}
+
+
 class ConsoleLoggingHandler(BaseCallbackHandler):
     _boot_logged = False
 
@@ -154,6 +160,42 @@ class RagService(object):
 
             return _fallback()
 
+    def stream_events(self, inputs: dict, config: Optional[dict] = None):
+        """以 LangGraph 事件流驱动 UI 状态展示，同时保持最终答案兼容。"""
+        try:
+            prepared_inputs = self._prepare_inputs(inputs)
+            normalized_config = self._normalize_config(config)
+            session_id, history_messages = self._get_session_history(normalized_config)
+            graph_inputs = self._build_graph_inputs(prepared_inputs, history_messages)
+
+            yield {"type": "status", "label": "🤔 正在理解你的需求，构思搭配方向..."}
+
+            last_state = None
+            seen_tool_call_ids = set()
+            for state in self.chain.stream(graph_inputs, config=normalized_config, stream_mode="values"):
+                last_state = state
+                for tool_call in self._extract_tool_calls_from_state(state):
+                    call_id = tool_call.get("id") or json.dumps(tool_call, ensure_ascii=False, sort_keys=True)
+                    if call_id in seen_tool_call_ids:
+                        continue
+                    seen_tool_call_ids.add(call_id)
+                    yield {"type": "status", "label": self._format_tool_event_label(tool_call)}
+                    yield {"type": "status", "label": "✅ 信息已获取，继续优化方案..."}
+
+            yield {"type": "status", "label": "✨ 灵感迸发，正在为你整理专属穿搭方案..."}
+
+            answer = self._extract_answer_from_state(last_state)
+            try:
+                FileChatMessageHistory(session_id=session_id).add_messages(
+                    [HumanMessage(content=prepared_inputs.get("input", "")), AIMessage(content=answer)]
+                )
+            except Exception as exc:
+                print(f"[WARN] 聊天历史写入不可用，已跳过持久化：{exc}", flush=True)
+
+            yield {"type": "answer", "content": answer}
+        except Exception:
+            yield {"type": "error", "content": FALLBACK_MESSAGE}
+
     def invoke(self, inputs: dict, config: Optional[dict] = None):
         try:
             prepared_inputs = self._prepare_inputs(inputs)
@@ -224,12 +266,36 @@ class RagService(object):
                 return str(content)
         return FALLBACK_MESSAGE
 
-    def _invoke_graph(self, inputs: dict, config: Optional[dict] = None) -> str:
-        normalized_config = self._normalize_config(config)
-        session_id, history_messages = self._get_session_history(normalized_config)
-        system_prompt = self._build_system_prompt(inputs)
+    def _extract_tool_calls_from_state(self, state) -> list[dict]:
+        messages = []
+        if isinstance(state, dict):
+            messages = state.get("messages", [])
+        elif isinstance(state, list):
+            messages = state
 
-        graph_inputs = {
+        tool_calls = []
+        for msg in messages:
+            for tool_call in getattr(msg, "tool_calls", []) or []:
+                if isinstance(tool_call, dict):
+                    tool_calls.append(tool_call)
+        return tool_calls
+
+    def _format_tool_event_label(self, tool_call: dict) -> str:
+        tool_name = tool_call.get("name", "")
+        args = tool_call.get("args") or {}
+        if isinstance(args, dict):
+            query = args.get("query") or args.get("input") or args.get("question") or ""
+        else:
+            query = str(args)
+        query = str(query)[:60]
+        emoji, verb, noun = TOOL_EVENT_LABELS.get(tool_name, ("🛠️", f"正在调用 {tool_name}", ""))
+        if noun and query:
+            return f"{emoji} {verb}（{noun}）：{query}"
+        return f"{emoji} {verb}..."
+
+    def _build_graph_inputs(self, inputs: dict, history_messages: list[BaseMessage]) -> dict:
+        system_prompt = self._build_system_prompt(inputs)
+        return {
             "messages": [
                 SystemMessage(content=system_prompt),
                 SystemMessage(content="以下是你们的历史对话记录："),
@@ -237,6 +303,11 @@ class RagService(object):
                 HumanMessage(content=inputs.get("input", "")),
             ]
         }
+
+    def _invoke_graph(self, inputs: dict, config: Optional[dict] = None) -> str:
+        normalized_config = self._normalize_config(config)
+        session_id, history_messages = self._get_session_history(normalized_config)
+        graph_inputs = self._build_graph_inputs(inputs, history_messages)
 
         state = self.chain.invoke(graph_inputs, config=normalized_config)
         answer = self._extract_answer_from_state(state)
