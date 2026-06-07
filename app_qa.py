@@ -22,6 +22,15 @@ def render_page():
     """渲染穿搭问答页面（问答 + 智能衣橱）。
     由 app_main.py 安全导入调用，也可独立运行。
     """
+    def safe_get_wardrobe_items(service, context_label: str):
+        """安全读取衣橱数据，避免网络波动导致整个页面中断。"""
+        try:
+            return service.get_all_items()
+        except Exception as exc:
+            st.warning(f"{context_label}暂时不可用，小衣会先在无衣橱数据的情况下继续服务。")
+            print(f"[WARN] {context_label}读取失败：{exc}", flush=True)
+            return []
+
     def typewriter_stream(stream, delay: float = 0.02):
         """将流式输出拆分为逐字渲染，实现打字机效果。"""
         for chunk in stream:
@@ -453,7 +462,7 @@ def render_page():
 
     with tab_chat:
         wardrobe_service = WardrobeService(user_id=user_id, vector_wardrobe=st.session_state["vector_wardrobe"])
-        wardrobe_items = wardrobe_service.get_all_items()
+        wardrobe_items = safe_get_wardrobe_items(wardrobe_service, "衣橱数据")
 
         st.markdown("#### 📅 本周穿搭计划")
         plan_col, hint_col = st.columns([1, 3])
@@ -729,7 +738,7 @@ def render_page():
             st.session_state.editing_item_id = None
 
         # ===== 数据管理工具栏 =====
-        items = service.get_all_items()
+        items = safe_get_wardrobe_items(service, "衣橱管理数据")
 
         with st.expander("💾 衣橱备份与数据管理", expanded=False):
             col_export, col_import = st.columns(2)
