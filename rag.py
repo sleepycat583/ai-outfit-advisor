@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, TypedDict
 
 import datetime
 import copy
@@ -18,6 +18,17 @@ import config_data as config
 from langchain_community.chat_models.tongyi import ChatTongyi
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain.tools.retriever import create_retriever_tool
+
+
+class OutfitState(TypedDict, total=False):
+    messages: list
+    wardrobe_items: list
+    weather_info: str
+    knowledge_results: list
+    user_profile: dict
+    input: str
+    needs_weather: bool
+    final_answer: str
 
 
 class OOTDItem(BaseModel):
@@ -116,9 +127,15 @@ class ConsoleLoggingHandler(BaseCallbackHandler):
 
 
 class RagService(object):
-    def __init__(self, vector_wardrobe: Optional[VectorWardrobeService] = None, user_id: str = ""):
+    def __init__(
+        self,
+        vector_wardrobe: Optional[VectorWardrobeService] = None,
+        user_id: str = "",
+        use_graph: bool = False,
+    ):
         self.vector_wardrobe = vector_wardrobe
         self.user_id = user_id
+        self.use_graph = use_graph
 
         self.vector_service = VectorStoreService(
             embedding=DashScopeEmbeddings(model=config.EMBEDDING_MODEL_NAME),
@@ -127,7 +144,7 @@ class RagService(object):
 
         self.chat_model = ChatTongyi(model=config.chat_model_name)
 
-        self.chain = self.__get_chain()
+        self.chain = self.__get_state_graph() if self.use_graph else self.__get_chain()
 
     def _with_current_date(self, inputs: dict) -> dict:
         if "current_date" in inputs:
@@ -168,6 +185,10 @@ class RagService(object):
         """以 LangGraph 事件流驱动 UI 状态展示，同时保持最终答案兼容。"""
         try:
             prepared_inputs = self._prepare_inputs(inputs)
+            if self.use_graph:
+                yield from self._stream_state_graph_events(prepared_inputs, config=config)
+                return
+
             normalized_config = self._normalize_config(config)
             session_id, history_messages = self._get_session_history(normalized_config)
             graph_inputs = self._build_graph_inputs(prepared_inputs, history_messages)
@@ -220,6 +241,14 @@ class RagService(object):
             from langgraph.prebuilt import create_react_agent
 
             return create_react_agent
+        except Exception as exc:
+            raise RuntimeError(LANGGRAPH_IMPORT_ERROR_MESSAGE) from exc
+
+    def _get_state_graph_factory(self):
+        try:
+            from langgraph.graph import END, START, StateGraph
+
+            return StateGraph, START, END
         except Exception as exc:
             raise RuntimeError(LANGGRAPH_IMPORT_ERROR_MESSAGE) from exc
 
@@ -354,7 +383,142 @@ class RagService(object):
             ]
         }
 
-    def _invoke_graph(self, inputs: dict, config: Optional[dict] = None) -> str:
+    def _build_state_graph_inputs(self, inputs: dict, history_messages: list[BaseMessage]) -> OutfitState:
+        user_profile = {
+            "gender": inputs.get("gender", "未设置"),
+            "style": inputs.get("style", "未设置"),
+            "body": inputs.get("body", ""),
+            "city": inputs.get("city", ""),
+            "current_date": inputs.get("current_date", datetime.datetime.now().strftime("%Y年%m月%d日")),
+            "wardrobe": inputs.get("wardrobe", ""),
+        }
+        return {
+            "messages": [*history_messages, HumanMessage(content=inputs.get("input", ""))],
+            "wardrobe_items": [inputs.get("wardrobe", "")],
+            "weather_info": "",
+            "knowledge_results": [],
+            "user_profile": user_profile,
+            "input": inputs.get("input", ""),
+            "needs_weather": False,
+            "final_answer": "",
+        }
+
+    def _get_latest_user_message(self, messages: list[BaseMessage]) -> str:
+        for msg in reversed(messages or []):
+            if isinstance(msg, HumanMessage) and msg.content:
+                return str(msg.content)
+        return ""
+
+    def _should_fetch_weather_for_input(self, user_input: str) -> bool:
+        text = str(user_input or "")
+        weather_keywords = [
+            "今天",
+            "明天",
+            "后天",
+            "未来",
+            "天气",
+            "下雨",
+            "降温",
+            "升温",
+            "冷不冷",
+            "热不热",
+            "出门",
+            "户外",
+            "通勤",
+            "面试",
+            "约会",
+            "见客户",
+            "旅行",
+        ]
+        non_weather_keywords = [
+            "怎么搭",
+            "配什么",
+            "什么裤子",
+            "什么鞋",
+            "颜色",
+            "洗",
+            "洗护",
+            "尺码",
+            "版型",
+        ]
+        if any(keyword in text for keyword in weather_keywords):
+            return True
+        if any(keyword in text for keyword in non_weather_keywords):
+            return False
+        return False
+
+    def _format_knowledge_results(self, docs) -> list[str]:
+        formatted = []
+        for doc in docs or []:
+            content = getattr(doc, "page_content", "") or str(doc)
+            content = str(content).strip()
+            if content:
+                formatted.append(content[:500])
+        return formatted[:4]
+
+    def _node_load_context(self, state: OutfitState) -> OutfitState:
+        return {
+            **state,
+            "input": state.get("input") or self._get_latest_user_message(state.get("messages", [])),
+            "wardrobe_items": state.get("wardrobe_items") or [state.get("user_profile", {}).get("wardrobe", "")],
+        }
+
+    def _node_route_intent(self, state: OutfitState) -> OutfitState:
+        return {**state, "needs_weather": self._should_fetch_weather_for_input(state.get("input", ""))}
+
+    def _route_after_intent(self, state: OutfitState) -> str:
+        return "fetch_weather" if state.get("needs_weather") else "search_knowledge"
+
+    def _node_fetch_weather(self, state: OutfitState) -> OutfitState:
+        user_profile = state.get("user_profile", {})
+        city = str(user_profile.get("city", "")).strip()
+        if not city:
+            weather_info = "【天气信息】未提供所在城市，本次不查询实时天气，请仅结合当前季节与用户场景完成穿搭建议。"
+        else:
+            weather_info = self._weather_search(f"{city} 天气")
+        return {**state, "weather_info": weather_info}
+
+    def _node_search_knowledge(self, state: OutfitState) -> OutfitState:
+        retriever = self.vector_service.get_retriever()
+        docs = retriever.invoke(state.get("input", ""))
+        return {**state, "knowledge_results": self._format_knowledge_results(docs)}
+
+    def _node_generate(self, state: OutfitState) -> OutfitState:
+        user_profile = state.get("user_profile", {})
+        inputs = {
+            "current_date": user_profile.get("current_date", datetime.datetime.now().strftime("%Y年%m月%d日")),
+            "gender": user_profile.get("gender", "未设置"),
+            "style": user_profile.get("style", "未设置"),
+            "body": user_profile.get("body", ""),
+            "city": user_profile.get("city", ""),
+            "wardrobe": "\n".join(item for item in state.get("wardrobe_items", []) if item) or "暂无已录入的单品（请先去「智能衣橱」拍照上传）",
+        }
+        system_prompt = self._build_system_prompt(inputs)
+        weather_info = state.get("weather_info", "")
+        knowledge_results = state.get("knowledge_results", [])
+        knowledge_text = "\n".join(f"- {item}" for item in knowledge_results) if knowledge_results else "- 暂无额外知识库命中"
+        user_input = state.get("input", "")
+        prompt = (
+            f"{system_prompt}\n\n"
+            f"【天气补充信息】\n{weather_info or '无需额外天气信息'}\n\n"
+            f"【知识库补充信息】\n{knowledge_text}\n\n"
+            f"【用户问题】\n{user_input}"
+        )
+        response = self.chat_model.invoke(prompt)
+        answer = response.content if hasattr(response, "content") else str(response)
+        return {
+            **state,
+            "final_answer": str(answer),
+            "messages": [*state.get("messages", []), AIMessage(content=str(answer))],
+        }
+
+    def _extract_answer_from_outfit_state(self, state: OutfitState) -> str:
+        answer = state.get("final_answer", "")
+        if answer:
+            return answer
+        return self._extract_answer_from_state(state.get("messages", []))
+
+    def _invoke_react_agent(self, inputs: dict, config: Optional[dict] = None) -> str:
         normalized_config = self._normalize_config(config)
         session_id, history_messages = self._get_session_history(normalized_config)
         graph_inputs = self._build_graph_inputs(inputs, history_messages)
@@ -369,6 +533,64 @@ class RagService(object):
         except Exception as exc:
             print(f"[WARN] 聊天历史写入不可用，已跳过持久化：{exc}", flush=True)
         return answer
+
+    def _invoke_state_graph(self, inputs: dict, config: Optional[dict] = None) -> str:
+        normalized_config = self._normalize_config(config)
+        session_id, history_messages = self._get_session_history(normalized_config)
+        state_inputs = self._build_state_graph_inputs(inputs, history_messages)
+        state = self.chain.invoke(state_inputs, config=normalized_config)
+        answer = self._extract_answer_from_outfit_state(state)
+
+        try:
+            FileChatMessageHistory(session_id=session_id).add_messages(
+                [HumanMessage(content=inputs.get("input", "")), AIMessage(content=answer)]
+            )
+        except Exception as exc:
+            print(f"[WARN] 聊天历史写入不可用，已跳过持久化：{exc}", flush=True)
+        return answer
+
+    def _stream_state_graph_events(self, inputs: dict, config: Optional[dict] = None):
+        normalized_config = self._normalize_config(config)
+        session_id, history_messages = self._get_session_history(normalized_config)
+        state_inputs = self._build_state_graph_inputs(inputs, history_messages)
+
+        yield {"type": "status", "label": "🤔 正在读取用户档案与衣橱信息..."}
+
+        latest_state = state_inputs
+        for event in self.chain.stream(state_inputs, config=normalized_config, stream_mode="updates"):
+            if "load_context" in event:
+                latest_state = {**latest_state, **event["load_context"]}
+                yield {"type": "status", "label": "🧾 已加载用户档案与衣橱信息"}
+            elif "route_intent" in event:
+                latest_state = {**latest_state, **event["route_intent"]}
+                if latest_state.get("needs_weather"):
+                    yield {"type": "status", "label": "🌤️ 正在判断天气相关需求，准备查询天气..."}
+                else:
+                    yield {"type": "status", "label": "🧭 已判断为非天气优先问题，跳过天气查询"}
+            elif "fetch_weather" in event:
+                latest_state = {**latest_state, **event["fetch_weather"]}
+                yield {"type": "status", "label": "🌦️ 已获取天气信息，继续检索穿搭知识..."}
+            elif "search_knowledge" in event:
+                latest_state = {**latest_state, **event["search_knowledge"]}
+                yield {"type": "status", "label": "📚 正在整理穿搭知识与经验..."}
+            elif "generate" in event:
+                latest_state = {**latest_state, **event["generate"]}
+                yield {"type": "status", "label": "✨ 正在生成最终穿搭建议..."}
+
+        answer = self._extract_answer_from_outfit_state(latest_state)
+        try:
+            FileChatMessageHistory(session_id=session_id).add_messages(
+                [HumanMessage(content=inputs.get("input", "")), AIMessage(content=answer)]
+            )
+        except Exception as exc:
+            print(f"[WARN] 聊天历史写入不可用，已跳过持久化：{exc}", flush=True)
+
+        yield {"type": "answer", "content": answer}
+
+    def _invoke_graph(self, inputs: dict, config: Optional[dict] = None) -> str:
+        if self.use_graph:
+            return self._invoke_state_graph(inputs, config=config)
+        return self._invoke_react_agent(inputs, config=config)
 
     def _weather_search(self, query: str) -> str:
         current_year = datetime.datetime.now().year
@@ -518,6 +740,30 @@ class RagService(object):
         )
         tools = [search_tool, retriever_tool]
         return create_react_agent(self.chat_model, tools)
+
+    def __get_state_graph(self):
+        """获取显式 StateGraph 版本的穿搭图。"""
+        StateGraph, START, END = self._get_state_graph_factory()
+        graph = StateGraph(OutfitState)
+
+        graph.add_node("load_context", self._node_load_context)
+        graph.add_node("route_intent", self._node_route_intent)
+        graph.add_node("fetch_weather", self._node_fetch_weather)
+        graph.add_node("search_knowledge", self._node_search_knowledge)
+        graph.add_node("generate", self._node_generate)
+
+        graph.add_edge(START, "load_context")
+        graph.add_edge("load_context", "route_intent")
+        graph.add_conditional_edges(
+            "route_intent",
+            self._route_after_intent,
+            {"fetch_weather": "fetch_weather", "search_knowledge": "search_knowledge"},
+        )
+        graph.add_edge("fetch_weather", "search_knowledge")
+        graph.add_edge("search_knowledge", "generate")
+        graph.add_edge("generate", END)
+
+        return graph.compile()
 
 
 if __name__ == "__main__":
