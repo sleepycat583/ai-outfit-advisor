@@ -344,6 +344,27 @@ LangGraph 都比传统 AgentExecutor 更自然。
 - streaming 改动会改变用户可见的“思考中”状态流转；
 - 分开提交后，一旦出现问题，更容易定位是数据读取层还是 agent 事件流层引起的。
 
+### 5.4 第三阶段当前落地状态：显式 StateGraph 并存实现
+
+截至目前，项目已经继续向前推进，并完成了显式 `StateGraph` 的并存落地：
+
+1. **显式 StateGraph 工作流已实现**
+   - Commit：`34a8a51`
+   - Message：`refactor: add explicit StateGraph outfit workflow`
+
+2. **并存策略已落地**
+   - `use_graph=False`：保留当前 LangGraph `create_react_agent` 路径，继续服务现有 UI 默认链路。
+   - `use_graph=True`：启用显式 `StateGraph` 路径，用于更清晰的节点编排、验证与后续灰度演进。
+
+3. **保持了对外兼容性**
+   - `RagService.invoke()` 签名未变
+   - `RagService.stream()` 签名未变
+   - `RagService.stream_events()` 签名未变
+
+这意味着当前项目不再只是“prebuilt agent + event stream”，而是已经进入：
+
+> **默认问答链路稳定运行，同时预留显式 StateGraph 路径作为架构升级入口。**
+
 ---
 
 ## 6. 迁移范围评估
@@ -516,6 +537,8 @@ def invoke(...):
 
 ## 8. 建议的目标架构
 
+> 注：本章原先描述的是“目标架构”。截至当前项目状态，其中“显式 StateGraph 并存落地”这一部分已经完成实现，不再只是规划。
+
 ### 8.1 第一阶段：低风险目标架构
 
 建议优先做“兼容式迁移”：
@@ -581,6 +604,34 @@ END
 ```
 
 这时系统就从“Agent 聊天”升级为“带业务状态的 AI 决策图”。
+
+### 8.3 当前已实现的显式 StateGraph 节点设计
+
+当前 `rag.py` 中已经实现的显式 `StateGraph` 节点为：
+
+1. `load_context`
+   - 加载用户输入、衣橱上下文和用户画像
+
+2. `route_intent`
+   - 判断问题是否需要天气信息
+
+3. `fetch_weather`
+   - 仅在天气路径执行，调用天气搜索逻辑
+
+4. `search_knowledge`
+   - 检索 Chroma / RAG 知识库结果
+
+5. `generate`
+   - 综合用户画像、天气信息、知识库结果与问题，生成最终穿搭建议
+
+对应条件边：
+
+```text
+route_intent → fetch_weather      （需要天气）
+route_intent → search_knowledge   （不需要天气）
+fetch_weather → search_knowledge
+search_knowledge → generate
+```
 
 ---
 
@@ -825,6 +876,65 @@ END
 
 4. **最后再考虑显式 StateGraph / checkpoint / 周计划 graph 化**
    - 否则会在“主链路尚未收敛稳定”时继续扩大系统复杂度。
+
+> 备注：上述建议形成时，显式 `StateGraph` 尚未落地。当前项目状态已经前进到“显式 `StateGraph` 已实现并与旧路径并存”，因此这里应理解为：
+>
+> - 普通问答显式 `StateGraph` 已完成初步落地；
+> - 后续仍可继续推进 checkpoint、周计划 graph 化与更细粒度节点治理。
+
+### 12.4 显式 StateGraph 已验证的节点事件流顺序
+
+在 `use_graph=True` 条件下，已经通过命令行验证了 `stream_events()` 与底层 `stream_mode="updates"` 的节点顺序。
+
+#### 天气场景
+
+测试输入：
+
+```python
+{"input": "明天去上海见客户，帮我搭配一套穿搭"}
+```
+
+底层节点顺序：
+
+```text
+load_context → route_intent → fetch_weather → search_knowledge → generate
+```
+
+与预期一致。
+
+#### 非天气场景
+
+测试输入：
+
+```python
+{"input": "我有一件白色衬衫，适合搭配什么裤子？"}
+```
+
+底层节点顺序：
+
+```text
+load_context → route_intent → search_knowledge → generate
+```
+
+并已确认：
+
+- **没有出现 `fetch_weather` 节点**
+
+这说明当前显式图的条件边已经按设计工作，具备较好的演示价值和后续演进基础。
+
+### 12.5 当前并存架构的一句话总结
+
+截至目前，`ai-outfit-advisor` 的普通问答架构可以概括为：
+
+```text
+默认稳定路径：LangGraph create_react_agent + stream_events()
+可切换演进路径：显式 StateGraph(use_graph=True)
+```
+
+这比单一路径迁移更适合真实工程：
+
+- 默认路径继续保证现有 UI 可用
+- 新路径支持节点级验证、架构展示与后续灰度切换
 
 如果后续开始真实迁移，建议先做以下产出：
 
