@@ -3,6 +3,7 @@ from typing import Optional
 import datetime
 import copy
 import json
+import re
 
 from pydantic import BaseModel, Field
 
@@ -38,6 +39,9 @@ FALLBACK_MESSAGE = "小衣当前思考超时，请稍后再试"
 LANGGRAPH_IMPORT_ERROR_MESSAGE = (
     "LangGraph 依赖不可用或版本不兼容，请安装与当前 LangChain 生态兼容的 LangGraph 版本后再试。"
 )
+MAX_AGENT_RECURSION_LIMIT = 8
+MAX_WEATHER_TOOL_CALLS_PER_TURN = 1
+MAX_TOTAL_TOOL_CALLS_PER_TURN = 4
 
 
 TOOL_EVENT_LABELS = {
@@ -172,6 +176,7 @@ class RagService(object):
 
             last_state = None
             seen_tool_call_ids = set()
+            observed_tool_calls = []
             for state in self.chain.stream(graph_inputs, config=normalized_config, stream_mode="values"):
                 last_state = state
                 for tool_call in self._extract_tool_calls_from_state(state):
@@ -179,8 +184,15 @@ class RagService(object):
                     if call_id in seen_tool_call_ids:
                         continue
                     seen_tool_call_ids.add(call_id)
+                    observed_tool_calls.append(tool_call)
                     yield {"type": "status", "label": self._format_tool_event_label(tool_call)}
                     yield {"type": "status", "label": "✅ 信息已获取，继续优化方案..."}
+                    if self._should_stop_streaming_for_tool_limits(observed_tool_calls):
+                        yield {"type": "status", "label": "🛑 已达到工具调用上限，基于现有信息整理最终建议..."}
+                        break
+                else:
+                    continue
+                break
 
             yield {"type": "status", "label": "✨ 灵感迸发，正在为你整理专属穿搭方案..."}
 
@@ -220,6 +232,7 @@ class RagService(object):
         configurable.setdefault("thread_id", session_id)
         configurable.setdefault("session_id", session_id)
         config["configurable"] = configurable
+        config.setdefault("recursion_limit", MAX_AGENT_RECURSION_LIMIT)
         return config
 
     def _build_system_prompt(self, inputs: dict) -> str:
@@ -280,6 +293,43 @@ class RagService(object):
                     tool_calls.append(tool_call)
         return tool_calls
 
+    def _should_stop_streaming_for_tool_limits(self, tool_calls: list[dict]) -> bool:
+        if len(tool_calls) >= MAX_TOTAL_TOOL_CALLS_PER_TURN:
+            return True
+        weather_calls = sum(1 for tool_call in tool_calls if tool_call.get("name") == "weather_search")
+        return weather_calls >= MAX_WEATHER_TOOL_CALLS_PER_TURN
+
+    def _sanitize_weather_search_result(self, raw_result: str, query: str) -> str:
+        text = re.sub(r"\s+", " ", str(raw_result or "")).strip()
+        if not text:
+            return (
+                "【天气查询已完成】未获取到稳定的实时天气结果。"
+                "请不要再次查询天气，直接结合当前月份、用户所在城市的季节气候和具体场景完成穿搭建议。"
+            )
+
+        lines = []
+        for part in re.split(r"[\n。；;]+", text):
+            cleaned = part.strip()
+            if len(cleaned) < 6:
+                continue
+            if any(keyword in cleaned.lower() for keyword in ["http", "www", "duckduckgo", "search"]):
+                continue
+            lines.append(cleaned)
+
+        if not lines:
+            return (
+                f"【天气查询已完成】已查询：{query}。"
+                "原始搜索结果噪音较大，未能提炼出稳定天气。"
+                "请不要再次查询天气，直接结合当前月份、用户所在城市的季节气候和用户场景完成穿搭建议。"
+            )
+
+        summary = "；".join(lines[:4])[:500]
+        return (
+            f"【天气查询已完成】查询：{query}。"
+            f"可用摘要：{summary}。"
+            "请基于以上结果继续给出穿搭建议，不要再次调用 weather_search。"
+        )
+
     def _format_tool_event_label(self, tool_call: dict) -> str:
         tool_name = tool_call.get("name", "")
         args = tool_call.get("args") or {}
@@ -328,13 +378,14 @@ class RagService(object):
         max_retries = 2
         for attempt in range(max_retries):
             try:
-                return DuckDuckGoSearchRun().run(query_with_date)
+                raw_result = DuckDuckGoSearchRun().run(query_with_date)
+                return self._sanitize_weather_search_result(raw_result, query_with_date)
             except Exception:
                 if attempt < max_retries - 1:
                     continue
                 return (
-                    "【系统提示】：由于网络原因无法获取实时天气。"
-                    "请仅根据用户所在城市当前的普遍季节气候，为其规划穿搭。"
+                    "【天气查询已完成】由于网络原因无法获取稳定的实时天气。"
+                    "请不要再次查询天气，仅根据用户所在城市当前的普遍季节气候与具体场景，为其规划穿搭。"
                 )
 
     def _extract_json_content(self, content: str) -> str:
@@ -456,6 +507,7 @@ class RagService(object):
                 "【所在城市】（例如'武陟'）构造查询参数，格式为'城市名 天气'（如'武陟 天气'）。"
                 "严禁查询'全国天气'、'全国'或任何不包含具体城市名的模糊查询。"
                 "搜索结果中如果包含多个日期的天气数据，只使用距离今天最近的数据，忽略超过3天前的数据。"
+                "每轮问答中天气最多查询一次；只要工具返回了结果，无论结果是否完整，都不要再次调用该工具，而应直接基于已有天气信息继续回答。"
             ),
             func=self._weather_search,
         )
