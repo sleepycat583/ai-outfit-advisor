@@ -42,13 +42,29 @@ def render_page():
 
 
     def get_image_base64(image_path):
-        """读取图片并转换为 Base64 字符串。支持本地路径和 HTTP(S) URL。"""
-        if image_path.startswith("http://") or image_path.startswith("https://"):
-            import urllib.request
-            with urllib.request.urlopen(image_path) as resp:
-                return base64.b64encode(resp.read()).decode("utf-8")
-        with open(image_path, "rb") as f:
-            return base64.b64encode(f.read()).decode("utf-8")
+        """读取图片并转换为 Base64 字符串。支持本地路径和 HTTP(S) URL。
+
+        参数:
+            image_path: 本地文件路径或远程图片 URL。
+
+        返回:
+            成功时返回 Base64 字符串；失败时返回空字符串，避免图片网络波动打断整页渲染。
+        """
+        try:
+            if image_path.startswith("http://") or image_path.startswith("https://"):
+                import urllib.request
+
+                request = urllib.request.Request(
+                    image_path,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                with urllib.request.urlopen(request, timeout=8) as resp:
+                    return base64.b64encode(resp.read()).decode("utf-8")
+            with open(image_path, "rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8")
+        except Exception as exc:
+            print(f"[WARN] 图片读取失败，已跳过：{image_path} | {exc}", flush=True)
+            return ""
 
 
     def build_item_flex_card(item, img_b64):
@@ -114,6 +130,8 @@ def render_page():
             if not image_path:
                 continue
             img_b64 = get_image_base64(image_path)
+            if not img_b64:
+                continue
             valid_items.append((item, img_b64))
 
         if not valid_items:
@@ -529,8 +547,11 @@ def render_page():
                                 img_path = w_item.get("image_path")
                                 if img_path:
                                     img_b64 = get_image_base64(img_path)
-                                    card_html = build_item_flex_card(w_item, img_b64)
-                                    st.markdown(f"- {desc}<br>{card_html}", unsafe_allow_html=True)
+                                    if img_b64:
+                                        card_html = build_item_flex_card(w_item, img_b64)
+                                        st.markdown(f"- {desc}<br>{card_html}", unsafe_allow_html=True)
+                                    else:
+                                        st.markdown(f"- {desc}")
                                 else:
                                     st.markdown(f"- {desc}")
                             else:
