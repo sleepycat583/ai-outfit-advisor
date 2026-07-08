@@ -5,6 +5,21 @@ AI 穿搭顾问 - 综合应用
 import streamlit as st
 from user_service import UserService
 
+
+@st.cache_data(show_spinner=False, ttl=60)
+def get_cached_profile(user_id: str) -> dict:
+    """缓存用户档案查询结果。
+
+    为什么这样做：用户档案属于读取频率高、变更频率低的数据，适合用
+    Streamlit 的 cache_data 暂存，减少页面 rerun 时重复等待 Supabase 返回。
+    """
+    return UserService().get_profile(user_id)
+
+
+def clear_profile_cache() -> None:
+    """清理用户档案缓存，避免资料更新后页面继续显示旧数据。"""
+    get_cached_profile.clear()
+
 # 设置页面配置 - 必须放在最前面
 st.set_page_config(
     page_title="小衣 · AI智能穿搭顾问",
@@ -114,17 +129,26 @@ import app_qa
 import app_file_uploader
 import time
 
+
+def perf_log(label: str, start_time: float) -> None:
+    """打印页面关键阶段耗时，便于定位 Streamlit rerun 的慢点。"""
+    print(f"[PERF] {label} took {time.time() - start_time:.3f}s", flush=True)
+
 # --- 初始化用户档案状态（所有页面共享）---
+page_boot_start = time.time()
 user_id = st.session_state["user_id"]
 user_service = UserService()
+perf_log("app_main user_service init", page_boot_start)
 
 if "user_gender" not in st.session_state:
-    saved_profile = user_service.get_profile(user_id)
+    profile_start = time.time()
+    saved_profile = get_cached_profile(user_id)
     st.session_state["user_gender"] = saved_profile.get("gender", "女生")
     st.session_state["user_style"] = saved_profile.get("style", "日常休闲")
     st.session_state["user_body"] = saved_profile.get("body", "")
     st.session_state["user_city"] = saved_profile.get("city", "")
     st.session_state["_last_saved_profile"] = saved_profile.copy()
+    perf_log("app_main initial profile load", profile_start)
 
 if "active_page" not in st.session_state:
     st.session_state["active_page"] = "qa"
@@ -187,6 +211,7 @@ with st.sidebar:
     }
     if st.session_state.get("_last_saved_profile") != current_profile:
         user_service.save_profile(user_id, current_profile)
+        clear_profile_cache()
         st.session_state["_last_saved_profile"] = current_profile.copy()
 
     with st.expander("🛠️ 开发者模式 (调试信息)", expanded=False):
@@ -225,6 +250,7 @@ if "message" not in st.session_state:
     from history import FileChatMessageHistory
 
     session_id = f"chat_session_{user_id}"
+    history_start = time.time()
     try:
         history = FileChatMessageHistory(session_id=session_id)
         past_messages = history.messages
@@ -238,6 +264,7 @@ if "message" not in st.session_state:
             st.session_state["message"] = [{"role": "assistant", "content": "你好，有什么可以帮助你？"}]
     except Exception:
         st.session_state["message"] = [{"role": "assistant", "content": "你好，有什么可以帮助你？"}]
+    perf_log("app_main initial message restore", history_start)
 
 # ===== 页面路由 =====
 if st.session_state["active_page"] == "kb":

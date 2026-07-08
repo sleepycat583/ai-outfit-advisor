@@ -5,6 +5,7 @@
 """
 
 import json
+import time
 from datetime import datetime
 from typing import Sequence
 
@@ -27,23 +28,29 @@ class FileChatMessageHistory(BaseChatMessageHistory):
     """
 
     def __init__(self, session_id: str, storage_path: str = ""):
+        start_time = time.time()
         self.session_id = session_id
         self.supabase = get_supabase_client()
         # storage_path 保留用于向后兼容
+        print(f"[PERF] FileChatMessageHistory.__init__ took {time.time() - start_time:.3f}s", flush=True)
 
     @property
     def messages(self) -> list[BaseMessage]:
+        start_time = time.time()
         result = (
             self.supabase.table("chat_messages")
             .select("messages")
             .eq("session_id", self.session_id)
             .execute()
         )
+        print(f"[PERF] FileChatMessageHistory.messages took {time.time() - start_time:.3f}s", flush=True)
         if result.data:
             return messages_from_dict(json.loads(result.data[0]["messages"]))
         return []
 
     def add_messages(self, messages: Sequence[BaseMessage]) -> None:
+        """追加聊天记录，并打印读取与写入总耗时。"""
+        start_time = time.time()
         new_dicts = [message_to_dict(msg) for msg in messages]
 
         # 读取现有消息
@@ -71,6 +78,7 @@ class FileChatMessageHistory(BaseChatMessageHistory):
                     "updated_at": datetime.now().isoformat(timespec="seconds"),
                 }
             ).execute()
+        print(f"[PERF] FileChatMessageHistory.add_messages took {time.time() - start_time:.3f}s", flush=True)
 
     def clear(self) -> None:
         self.supabase.table("chat_messages").delete().eq(

@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+import time
 import uuid
 from datetime import datetime
 from typing import Optional, TYPE_CHECKING
@@ -54,10 +55,12 @@ class WardrobeService:
         vector_wardrobe: Optional["VectorWardrobeService"] = None,
     ) -> None:
         # db_path 参数保留用于向后兼容
+        start_time = time.time()
         _ = db_path
         self.user_id = user_id
         self.supabase = get_supabase_client()
         self.vector_wardrobe = vector_wardrobe
+        print(f"[PERF] WardrobeService.__init__ took {time.time() - start_time:.3f}s", flush=True)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -193,6 +196,8 @@ class WardrobeService:
     # ------------------------------------------------------------------
 
     def get_all_items(self) -> list[dict]:
+        """读取当前用户全部衣橱单品，并打印 Supabase 查询耗时。"""
+        start_time = time.time()
         result = (
             self.supabase.table("wardrobe_items")
             .select("*")
@@ -200,6 +205,7 @@ class WardrobeService:
             .order("created_at", desc=True)
             .execute()
         )
+        print(f"[PERF] WardrobeService.get_all_items took {time.time() - start_time:.3f}s", flush=True)
         return [self._row_to_dict(r) for r in (result.data or [])]
 
     def add_item(self, item_data: dict, image_bytes: bytes = None) -> dict:

@@ -12,9 +12,29 @@ from rag import RagService, ConsoleLoggingHandler, FALLBACK_MESSAGE
 from vector_store_service import VectorWardrobeService
 from wardrobe_service import WardrobeService
 
+
+@st.cache_data(show_spinner=False, ttl=60)
+def get_cached_wardrobe_items(user_id: str) -> list[dict]:
+    """缓存衣橱列表查询结果。
+
+    为什么这样做：衣橱列表在聊天页、衣橱页、rerun 阶段都会被频繁读取，
+    但大多数时候内容并没有变化。缓存后可以显著减少重复 Supabase 查询。
+    """
+    return WardrobeService(user_id=user_id).get_all_items()
+
+
+def clear_wardrobe_items_cache() -> None:
+    """清理衣橱列表缓存，避免新增/编辑/删除后继续显示旧数据。"""
+    get_cached_wardrobe_items.clear()
+
 # 强制指定阿里云 DashScope 接口不走本地代理，解决 ProxyError
 if config.NO_PROXY:
     os.environ["NO_PROXY"] = config.NO_PROXY
+
+
+def perf_log(label: str, start_time: float) -> None:
+    """打印问答页关键阶段耗时，帮助定位 Streamlit rerun 与问答慢点。"""
+    print(f"[PERF] {label} took {time.time() - start_time:.3f}s", flush=True)
 
 
 
@@ -25,7 +45,7 @@ def render_page():
     def safe_get_wardrobe_items(service, context_label: str):
         """安全读取衣橱数据，避免网络波动导致整个页面中断。"""
         try:
-            return service.get_all_items()
+            return get_cached_wardrobe_items(service.user_id)
         except Exception as exc:
             st.warning(f"{context_label}暂时不可用，小衣会先在无衣橱数据的情况下继续服务。")
             print(f"[WARN] {context_label}读取失败：{exc}", flush=True)
@@ -440,14 +460,18 @@ def render_page():
         st.session_state["message"] = [{"role": "assistant", "content": "你好，有什么可以帮助你？"}]
 
     if "vector_wardrobe" not in st.session_state:
+        vector_start = time.time()
         embedding = DashScopeEmbeddings(model=config.EMBEDDING_MODEL_NAME)
         st.session_state["vector_wardrobe"] = VectorWardrobeService(embedding, user_id=user_id)
+        perf_log("app_qa vector_wardrobe init", vector_start)
 
     if "rag" not in st.session_state:
+        rag_start = time.time()
         st.session_state["rag"] = RagService(
             vector_wardrobe=st.session_state["vector_wardrobe"],
             user_id=user_id,
         )
+        perf_log("app_qa rag init", rag_start)
 
     if "session_id" not in st.session_state:
         st.session_state["session_id"] = f"chat_session_{user_id}"
@@ -458,11 +482,18 @@ def render_page():
     if "weekly_plan" not in st.session_state:
         st.session_state["weekly_plan"] = None
 
+    # 业务说明：衣橱数据本次 rerun 内只读取一次，聊天页和衣橱页复用同一份结果。
+    # 这样可以避免 Streamlit 每次刷新时重复打两次 Supabase 查询。
+    shared_wardrobe_service = WardrobeService(
+        user_id=user_id,
+        vector_wardrobe=st.session_state["vector_wardrobe"],
+    )
+    shared_wardrobe_items = safe_get_wardrobe_items(shared_wardrobe_service, "衣橱数据")
+
     tab_chat, tab_wardrobe = st.tabs(["💬 穿搭顾问", "👗 智能衣橱"])
 
     with tab_chat:
-        wardrobe_service = WardrobeService(user_id=user_id, vector_wardrobe=st.session_state["vector_wardrobe"])
-        wardrobe_items = safe_get_wardrobe_items(wardrobe_service, "衣橱数据")
+        wardrobe_items = shared_wardrobe_items
 
         st.markdown("#### 📅 本周穿搭计划")
         plan_col, hint_col = st.columns([1, 3])
@@ -586,6 +617,7 @@ def render_page():
                             wardrobe_text = "暂无已录入的单品（请先去「智能衣橱」拍照上传）"
 
                         res = FALLBACK_MESSAGE
+                        qa_start = time.time()
                         for event in st.session_state["rag"].stream_events(
                             {
                                 "input": final_prompt,
@@ -597,7 +629,10 @@ def render_page():
                                 "current_date": datetime.datetime.now().strftime("%Y年%m月%d日"),
                             },
                             config={
-                                "configurable": {"session_id": st.session_state["session_id"]},
+                                "configurable": {
+                                    "session_id": st.session_state["session_id"],
+                                    "history_messages": st.session_state.get("message", []),
+                                },
                                 "callbacks": [ConsoleLoggingHandler()],
                             },
                         ):
@@ -610,6 +645,7 @@ def render_page():
                             elif event_type == "error":
                                 res = event.get("content", FALLBACK_MESSAGE)
                                 status.update(label="⚠️ 小衣思考超时，请稍后再试", state="error", expanded=False)
+                        perf_log("app_qa qa stream_events", qa_start)
                     except Exception:
                         res = FALLBACK_MESSAGE
                         status.update(label="⚠️ 小衣思考超时，请稍后再试", state="error", expanded=False)
@@ -623,7 +659,7 @@ def render_page():
 
     with tab_wardrobe:
         st.subheader("👗 智能衣橱")
-        service = WardrobeService(user_id=user_id, vector_wardrobe=st.session_state["vector_wardrobe"])
+        service = shared_wardrobe_service
         category_options = config.WARDROBE_CATEGORIES
         season_options = ["春", "夏", "秋", "冬"]
 
@@ -701,6 +737,7 @@ def render_page():
                             }
                             image_bytes = st.session_state.get("wardrobe_draft_image")
                             service.add_item(item_data, image_bytes=image_bytes)
+                            clear_wardrobe_items_cache()
                             item["inserted"] = True
                             st.success("已加入衣橱")
                             st.rerun()
@@ -736,6 +773,7 @@ def render_page():
                         }
                         image_bytes = manual_image.getvalue() if manual_image else None
                         service.add_item(item_data, image_bytes=image_bytes)
+                        clear_wardrobe_items_cache()
                         st.toast("单品已成功加入衣橱！👗", icon="✅")
                         time.sleep(0.5)
                         st.rerun()
@@ -745,7 +783,7 @@ def render_page():
             st.session_state.editing_item_id = None
 
         # ===== 数据管理工具栏 =====
-        items = safe_get_wardrobe_items(service, "衣橱管理数据")
+        items = shared_wardrobe_items
 
         with st.expander("💾 衣橱备份与数据管理", expanded=False):
             col_export, col_import = st.columns(2)
@@ -782,6 +820,7 @@ def render_page():
                             csv_text = uploaded_csv.getvalue().decode("utf-8")
                             mode = "replace" if "覆盖" in import_mode else "append"
                             count = service.import_from_csv(csv_text, mode=mode)
+                            clear_wardrobe_items_cache()
                             st.toast(f"成功导入 {count} 件单品！👗", icon="✅")
                             time.sleep(0.5)
                             st.rerun()
@@ -876,6 +915,7 @@ def render_page():
                         if new_image is not None:
                             image_bytes_to_save = new_image.getvalue()
                         svc.update_item(item_id, update_data, image_bytes=image_bytes_to_save)
+                        clear_wardrobe_items_cache()
                         st.session_state.editing_item_id = None
                         st.toast("单品信息已更新！✨", icon="✅")
                         time.sleep(0.3)
@@ -893,6 +933,7 @@ def render_page():
                     with c_confirm:
                         if st.button("✅ 确认删除", key=f"{prefix}_del_confirm", use_container_width=True):
                             svc.delete_item(item_id)
+                            clear_wardrobe_items_cache()
                             st.session_state.editing_item_id = None
                             st.session_state._confirming_delete = None
                             st.toast("已删除！🗑️", icon="✅")

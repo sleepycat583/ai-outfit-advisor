@@ -1,4 +1,5 @@
 import os
+import time
 
 from langchain_chroma import Chroma
 import config_data as config
@@ -6,6 +7,8 @@ import config_data as config
 
 class VectorStoreService(object):
     def __init__(self, embedding, user_id: str = ""):
+        """初始化知识库向量服务，并打印 Chroma 连接初始化耗时。"""
+        start_time = time.time()
         self.embedding = embedding
         self.user_id = user_id
 
@@ -19,6 +22,7 @@ class VectorStoreService(object):
             embedding_function=self.embedding,
             persist_directory=persist_dir,
         )
+        print(f"[PERF] VectorStoreService.__init__ took {time.time() - start_time:.3f}s", flush=True)
 
     def get_retriever(self):
         """返回向量库检索器，方便加入 Chain"""
@@ -29,6 +33,8 @@ class VectorWardrobeService:
     """管理衣橱单品的向量索引（独立 Chroma Collection），用于语义检索 Top-K 单品。"""
 
     def __init__(self, embedding, user_id: str = ""):
+        """初始化衣橱向量服务，并打印 Chroma 连接初始化耗时。"""
+        start_time = time.time()
         self.embedding = embedding
         self.user_id = user_id
         persist_directory = os.path.join(config.persist_directory, user_id, "wardrobe") if user_id else os.path.join(config.persist_directory, "wardrobe")
@@ -38,6 +44,7 @@ class VectorWardrobeService:
             embedding_function=self.embedding,
             persist_directory=persist_directory,
         )
+        print(f"[PERF] VectorWardrobeService.__init__ took {time.time() - start_time:.3f}s", flush=True)
 
     def add_items(self, items: list[tuple[str, str]]) -> None:
         """批量添加单品文本到向量库。items 为 [(item_id, text), ...] 列表。"""
@@ -68,8 +75,10 @@ class VectorWardrobeService:
             self.vector_store.delete(ids=existing["ids"])
 
     def search(self, query: str, k: int = 15) -> list[str]:
-        """语义检索最相关的 Top-K 单品描述文本。"""
+        """语义检索最相关的 Top-K 单品描述文本，并打印检索耗时。"""
+        start_time = time.time()
         docs = self.vector_store.similarity_search(query, k=k)
+        print(f"[PERF] VectorWardrobeService.search took {time.time() - start_time:.3f}s", flush=True)
         return [doc.page_content for doc in docs]
 
 

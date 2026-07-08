@@ -3,6 +3,7 @@ from typing import Optional
 import datetime
 import copy
 import json
+import time
 
 from pydantic import BaseModel, Field
 
@@ -113,6 +114,8 @@ class ConsoleLoggingHandler(BaseCallbackHandler):
 
 class RagService(object):
     def __init__(self, vector_wardrobe: Optional[VectorWardrobeService] = None, user_id: str = ""):
+        """初始化 RAG 服务，并打印模型、向量库、LangGraph 组装耗时。"""
+        start_time = time.time()
         self.vector_wardrobe = vector_wardrobe
         self.user_id = user_id
 
@@ -124,6 +127,7 @@ class RagService(object):
         self.chat_model = ChatTongyi(model=config.chat_model_name)
 
         self.chain = self.__get_chain()
+        print(f"[PERF] RagService.__init__ took {time.time() - start_time:.3f}s", flush=True)
 
     def _with_current_date(self, inputs: dict) -> dict:
         if "current_date" in inputs:
@@ -134,6 +138,7 @@ class RagService(object):
 
     def _prepare_inputs(self, inputs: dict) -> dict:
         """预处理输入：注入当前日期，并通过向量检索压缩衣橱文本。"""
+        start_time = time.time()
         inputs = self._with_current_date(inputs)
         if self.vector_wardrobe:
             query = inputs.get("input", "")
@@ -142,6 +147,7 @@ class RagService(object):
                 top_texts = self.vector_wardrobe.search(query, k=15)
                 if top_texts:
                     inputs["wardrobe"] = "\n".join(top_texts)
+        print(f"[PERF] RagService._prepare_inputs took {time.time() - start_time:.3f}s", flush=True)
         return inputs
 
     def stream(self, inputs: dict, config: Optional[dict] = None):
@@ -163,6 +169,7 @@ class RagService(object):
     def stream_events(self, inputs: dict, config: Optional[dict] = None):
         """以 LangGraph 事件流驱动 UI 状态展示，同时保持最终答案兼容。"""
         try:
+            total_start = time.time()
             prepared_inputs = self._prepare_inputs(inputs)
             normalized_config = self._normalize_config(config)
             session_id, history_messages = self._get_session_history(normalized_config)
@@ -192,6 +199,7 @@ class RagService(object):
             except Exception as exc:
                 print(f"[WARN] 聊天历史写入不可用，已跳过持久化：{exc}", flush=True)
 
+            print(f"[PERF] RagService.stream_events total took {time.time() - total_start:.3f}s", flush=True)
             yield {"type": "answer", "content": answer}
         except Exception:
             yield {"type": "error", "content": FALLBACK_MESSAGE}
@@ -222,6 +230,32 @@ class RagService(object):
         config["configurable"] = configurable
         return config
 
+    def _coerce_history_messages(self, raw_messages) -> list[BaseMessage]:
+        """把外部传入的历史消息转成 LangChain message 对象。
+
+        为什么这么做：Streamlit 页面里已经把当前会话消息保存在 session_state。
+        如果问答前还要再去 Supabase 读一遍聊天历史，就会多出一次同步网络等待。
+        这里允许优先复用内存里的历史，减少问答前的阻塞时间。
+        """
+        if not raw_messages:
+            return []
+
+        messages: list[BaseMessage] = []
+        for msg in raw_messages:
+            if isinstance(msg, BaseMessage):
+                messages.append(msg)
+                continue
+            if not isinstance(msg, dict):
+                continue
+
+            role = msg.get("role")
+            content = msg.get("content", "")
+            if role == "user":
+                messages.append(HumanMessage(content=content))
+            elif role == "assistant":
+                messages.append(AIMessage(content=content))
+        return messages
+
     def _build_system_prompt(self, inputs: dict) -> str:
         prompt_inputs = {
             "current_date": inputs.get("current_date", datetime.datetime.now().strftime("%Y年%m月%d日")),
@@ -234,13 +268,26 @@ class RagService(object):
         return RAG_SYSTEM_PROMPT.format(**prompt_inputs)
 
     def _get_session_history(self, config: Optional[dict]) -> tuple[str, list[BaseMessage]]:
+        """读取聊天历史，并打印 Supabase 查询耗时。"""
+        start_time = time.time()
         normalized_config = self._normalize_config(config)
         session_id = normalized_config["configurable"]["session_id"]
+        preloaded_history = normalized_config["configurable"].get("history_messages")
+        if preloaded_history is not None:
+            messages = self._coerce_history_messages(preloaded_history)
+            print(
+                f"[PERF] RagService._get_session_history took {time.time() - start_time:.3f}s (memory cache)",
+                flush=True,
+            )
+            return session_id, messages
         try:
             history = FileChatMessageHistory(session_id=session_id)
-            return session_id, history.messages
+            messages = history.messages
+            print(f"[PERF] RagService._get_session_history took {time.time() - start_time:.3f}s", flush=True)
+            return session_id, messages
         except Exception as exc:
             print(f"[WARN] 聊天历史读取不可用，已使用空历史：{exc}", flush=True)
+            print(f"[PERF] RagService._get_session_history took {time.time() - start_time:.3f}s", flush=True)
             return session_id, []
 
     def _extract_answer_from_state(self, state) -> str:
@@ -444,7 +491,8 @@ class RagService(object):
             return data.get("days", data if isinstance(data, list) else [])
 
     def __get_chain(self):
-        """获取 LangGraph ReAct Agent。"""
+        """获取 LangGraph ReAct Agent，并打印组装工具链耗时。"""
+        start_time = time.time()
         retriever = self.vector_service.get_retriever()
         create_react_agent = self._get_langgraph_factory()
 
@@ -465,7 +513,9 @@ class RagService(object):
             "当用户询问关于服装洗涤、尺码推荐、颜色搭配等通用穿搭知识时，必须使用此工具。",
         )
         tools = [search_tool, retriever_tool]
-        return create_react_agent(self.chat_model, tools)
+        chain = create_react_agent(self.chat_model, tools)
+        print(f"[PERF] RagService.__get_chain took {time.time() - start_time:.3f}s", flush=True)
+        return chain
 
 
 if __name__ == "__main__":

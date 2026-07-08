@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import time
 import uuid
 from datetime import datetime
 
@@ -19,8 +20,10 @@ class UserService:
 
     def __init__(self, db_path: str | None = None):
         # db_path 参数保留用于向后兼容
+        start_time = time.time()
         _ = db_path
         self.supabase = get_supabase_client()
+        print(f"[PERF] UserService.__init__ took {time.time() - start_time:.3f}s", flush=True)
 
     @staticmethod
     def _hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
@@ -100,13 +103,15 @@ class UserService:
         return True
 
     def get_profile(self, user_id: str) -> dict:
-        """获取用户档案。"""
+        """获取用户档案，并打印 Supabase 查询耗时。"""
+        start_time = time.time()
         result = (
             self.supabase.table("users")
             .select("profile")
             .eq("id", user_id)
             .execute()
         )
+        print(f"[PERF] UserService.get_profile took {time.time() - start_time:.3f}s", flush=True)
         if result.data and result.data[0].get("profile"):
             return json.loads(result.data[0]["profile"])
         return {}
