@@ -723,6 +723,11 @@ def render_page():
         final_prompt = prompt or preset_prompt
 
         if final_prompt:
+            # 先拷贝追加前的历史，确保传给 Agent 的 history_messages 不包含当前轮用户输入。
+            # 为什么这样做：RagService._build_graph_inputs() 会在最后再追加一次当前 input，
+            # 如果这里把当前提问也放进 history_messages，就会让同一条用户消息重复注入两次。
+            history_before_current_turn = list(st.session_state.get("message", []))
+
             # 在页面输出用户的提问
             st.chat_message("user").write(final_prompt)
             st.session_state["message"].append({"role": "user", "content": final_prompt})
@@ -759,7 +764,7 @@ def render_page():
                             config={
                                 "configurable": {
                                     "session_id": st.session_state["session_id"],
-                                    "history_messages": st.session_state.get("message", []),
+                                    "history_messages": history_before_current_turn,
                                 },
                                 "callbacks": [ConsoleLoggingHandler()],
                             },
