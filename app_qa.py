@@ -13,6 +13,132 @@ from vector_store_service import VectorWardrobeService
 from wardrobe_service import WardrobeService
 
 
+# 诊断统计：记录一次 render_page() 内图片 Base64 处理的总调用次数与耗时。
+_image_load_stats = {
+    "count": 0,
+    "total_time": 0.0,
+    "network_count": 0,
+    "network_time": 0.0,
+    "local_count": 0,
+    "local_time": 0.0,
+    "cache_hit_count": 0,
+    "cache_miss_count": 0,
+}
+
+# 诊断统计：记录当前 Streamlit 进程里哪些图片 URL 已经真实加载过。
+_image_cache_seen_paths: set[str] = set()
+
+# 业务缓存：按 image_path 复用图片 Base64，支持单条目失效，避免换一张图就清空全部缓存。
+_image_base64_cache: dict[str, str] = {}
+
+
+def reset_image_load_stats() -> None:
+    """重置单次页面渲染期间的图片读取统计。"""
+    _image_load_stats.update(
+        {
+            "count": 0,
+            "total_time": 0.0,
+            "network_count": 0,
+            "network_time": 0.0,
+            "local_count": 0,
+            "local_time": 0.0,
+            "cache_hit_count": 0,
+            "cache_miss_count": 0,
+        }
+    )
+
+
+def log_image_load_stats() -> None:
+    """输出单次页面渲染期间的图片读取累计统计。"""
+    print(
+        "[PERF] get_image_base64 总调用次数="
+        f"{_image_load_stats['count']}（网络请求{_image_load_stats['network_count']}次/本地{_image_load_stats['local_count']}次），"
+        f"累计耗时={_image_load_stats['total_time']:.3f}s，"
+        f"网络耗时={_image_load_stats['network_time']:.3f}s，本地耗时={_image_load_stats['local_time']:.3f}s",
+        flush=True,
+    )
+    print(
+        f"[PERF] get_image_base64 缓存命中={_image_load_stats['cache_hit_count']}次，"
+        f"缓存未命中(真实网络请求)={_image_load_stats['cache_miss_count']}次",
+        flush=True,
+    )
+
+
+def _get_image_base64_cached(image_path: str) -> str:
+    """读取并缓存图片 Base64 结果，避免同一 URL 在多次 rerun 中重复下载。
+
+    参数:
+        image_path: 图片路径，支持 HTTP(S) URL 和本地文件路径。
+    返回值:
+        图片内容对应的 Base64 字符串。
+    """
+    cached = _image_base64_cache.get(image_path)
+    if cached is not None:
+        return cached
+
+    if image_path.startswith("http://") or image_path.startswith("https://"):
+        import urllib.request
+
+        with urllib.request.urlopen(image_path) as resp:
+            image_b64 = base64.b64encode(resp.read()).decode("utf-8")
+    else:
+        with open(image_path, "rb") as f:
+            image_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+    _image_base64_cache[image_path] = image_b64
+    _image_cache_seen_paths.add(image_path)
+    return image_b64
+
+
+def clear_image_base64_cache(image_path: str | None = None) -> None:
+    """清理图片 Base64 缓存。
+
+    参数:
+        image_path: 指定时只清理这一个图片 URL；不传时清空全部缓存。
+
+    为什么这样做：衣物换图时，旧图和新图通常复用同一个公开 URL。
+    这时必须把对应条目从缓存里剔除，但不应该连其他 20 多张图一起清掉。
+    """
+    if image_path:
+        _image_base64_cache.pop(image_path, None)
+        _image_cache_seen_paths.discard(image_path)
+        return
+
+    _image_base64_cache.clear()
+    _image_cache_seen_paths.clear()
+
+
+def get_image_base64(image_path: str) -> str:
+    """读取图片并转换为 Base64，同时累计单次页面渲染内的调用统计。
+
+    为什么这样做：底层真实读取交给缓存函数复用结果，外层保留调用次数和
+    本轮耗时统计，便于继续验证缓存命中后的实际收益。
+
+    参数:
+        image_path: 图片路径，支持 HTTP(S) URL 和本地文件路径。
+    返回值:
+        图片内容对应的 Base64 字符串。
+    """
+    load_start = time.time()
+    is_network = image_path.startswith("http://") or image_path.startswith("https://")
+    if image_path in _image_cache_seen_paths:
+        _image_load_stats["cache_hit_count"] += 1
+    else:
+        _image_load_stats["cache_miss_count"] += 1
+    image_b64 = _get_image_base64_cached(image_path)
+
+    elapsed = time.time() - load_start
+    _image_load_stats["count"] += 1
+    _image_load_stats["total_time"] += elapsed
+    if is_network:
+        _image_load_stats["network_count"] += 1
+        _image_load_stats["network_time"] += elapsed
+    else:
+        _image_load_stats["local_count"] += 1
+        _image_load_stats["local_time"] += elapsed
+    return image_b64
+
+
 @st.cache_data(show_spinner=False, ttl=60)
 def get_cached_wardrobe_items(user_id: str) -> list[dict]:
     """缓存衣橱列表查询结果。
@@ -42,6 +168,9 @@ def render_page():
     """渲染穿搭问答页面（问答 + 智能衣橱）。
     由 app_main.py 安全导入调用，也可独立运行。
     """
+    render_page_start = time.time()
+    reset_image_load_stats()
+
     def safe_get_wardrobe_items(service, context_label: str):
         """安全读取衣橱数据，避免网络波动导致整个页面中断。"""
         try:
@@ -59,16 +188,6 @@ def render_page():
             for char in text:
                 yield char
                 time.sleep(delay)
-
-
-    def get_image_base64(image_path):
-        """读取图片并转换为 Base64 字符串。支持本地路径和 HTTP(S) URL。"""
-        if image_path.startswith("http://") or image_path.startswith("https://"):
-            import urllib.request
-            with urllib.request.urlopen(image_path) as resp:
-                return base64.b64encode(resp.read()).decode("utf-8")
-        with open(image_path, "rb") as f:
-            return base64.b64encode(f.read()).decode("utf-8")
 
 
     def build_item_flex_card(item, img_b64):
@@ -446,6 +565,7 @@ def render_page():
       padding-bottom: 180px !important;
     }
     </style>"""
+    page_section_start = time.time()
     st.markdown(cozy_css, unsafe_allow_html=True)
 
     header_html = "<div class=\"app-header\"><span class=\"app-icon\">☀️</span><div class=\"app-title\">小衣 · 你的专属穿搭顾问</div></div>"
@@ -484,15 +604,18 @@ def render_page():
 
     # 业务说明：衣橱数据本次 rerun 内只读取一次，聊天页和衣橱页复用同一份结果。
     # 这样可以避免 Streamlit 每次刷新时重复打两次 Supabase 查询。
+    shared_wardrobe_start = time.time()
     shared_wardrobe_service = WardrobeService(
         user_id=user_id,
         vector_wardrobe=st.session_state["vector_wardrobe"],
     )
     shared_wardrobe_items = safe_get_wardrobe_items(shared_wardrobe_service, "衣橱数据")
+    perf_log("app_qa render_page shared wardrobe data", shared_wardrobe_start)
 
     tab_chat, tab_wardrobe = st.tabs(["💬 穿搭顾问", "👗 智能衣橱"])
 
     with tab_chat:
+        chat_render_start = time.time()
         wardrobe_items = shared_wardrobe_items
 
         st.markdown("#### 📅 本周穿搭计划")
@@ -568,12 +691,16 @@ def render_page():
                                 st.markdown(f"- {desc}")
                     st.markdown(f"**小贴士：**{day_plan.get('tips', '')}")
 
+        perf_log("app_qa render_page chat history render", chat_render_start)
+
+        chat_message_render_start = time.time()
         for message in st.session_state["message"]:
             if message["role"] == "assistant":
                 with st.chat_message(message["role"]):
                     render_message(message["content"], wardrobe_items)
             else:
                 st.chat_message(message["role"]).write(message["content"])
+        perf_log("app_qa render_page chat messages", chat_message_render_start)
 
         # --- 新增：快捷提问按钮 ---
         preset_prompt = None
@@ -589,6 +716,7 @@ def render_page():
                 preset_prompt = "我身高160，体重100斤，适合什么尺码？"
 
         # --- 接收用户输入 ---
+        input_status_start = time.time()
         prompt = st.chat_input("例如：明天要去互联网公司面试实习生，我该怎么穿？")
 
         # --- 处理逻辑 ---
@@ -656,8 +784,10 @@ def render_page():
                 placeholder.empty()
                 render_message(res, wardrobe_items)
             st.session_state["message"].append({"role": "assistant", "content": res})
+        perf_log("app_qa render_page input and status", input_status_start)
 
     with tab_wardrobe:
+        wardrobe_render_start = time.time()
         st.subheader("👗 智能衣橱")
         service = shared_wardrobe_service
         category_options = config.WARDROBE_CATEGORIES
@@ -914,7 +1044,13 @@ def render_page():
                         image_bytes_to_save = None
                         if new_image is not None:
                             image_bytes_to_save = new_image.getvalue()
-                        svc.update_item(item_id, update_data, image_bytes=image_bytes_to_save)
+                        updated_item = svc.update_item(item_id, update_data, image_bytes=image_bytes_to_save)
+                        if image_bytes_to_save is not None:
+                            old_image_path = item.get("image_path")
+                            if old_image_path:
+                                clear_image_base64_cache(old_image_path)
+                            if updated_item and updated_item.get("image_path"):
+                                clear_image_base64_cache(updated_item["image_path"])
                         clear_wardrobe_items_cache()
                         st.session_state.editing_item_id = None
                         st.toast("单品信息已更新！✨", icon="✅")
@@ -991,6 +1127,12 @@ def render_page():
                 else:
                     st.session_state.editing_item_id = None
                     st.rerun()
+
+        perf_log("app_qa render_page wardrobe tab", wardrobe_render_start)
+
+    perf_log("app_qa render_page page shell", page_section_start)
+    log_image_load_stats()
+    perf_log("app_qa render_page total", render_page_start)
 
 
 if __name__ == "__main__":
