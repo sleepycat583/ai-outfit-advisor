@@ -213,6 +213,9 @@ __marimo__/
 # Streamlit
 .streamlit/
 
+# Diagnostics artifacts
+diagnostics/*.json
+
 # App data (privacy)
 chat_history/
 data/chroma/

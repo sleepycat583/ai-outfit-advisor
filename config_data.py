@@ -39,6 +39,13 @@ similarity_threshold = 2  # 检索返回匹配的文档数量
 embedding_model_name = EMBEDDING_MODEL_NAME
 chat_model_name = "qwen3-max"
 
+# 聊天记忆配置
+chat_history_max_rounds = 10
+chat_history_summary_batch_rounds = 10
+chat_history_summary_interval_rounds = 3
+chat_history_summary_target_chars = 600
+chat_history_summary_max_chars = 1200
+
 session_config = {
     "configurable": {
         "session_id": "user_001",

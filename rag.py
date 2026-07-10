@@ -193,9 +193,11 @@ class RagService(object):
 
             answer = self._extract_answer_from_state(last_state)
             try:
-                FileChatMessageHistory(session_id=session_id).add_messages(
+                history = FileChatMessageHistory(session_id=session_id)
+                history.add_messages(
                     [HumanMessage(content=prepared_inputs.get("input", "")), AIMessage(content=answer)]
                 )
+                history.maybe_update_summary(summary_updater=self.summarize_chat_messages)
             except Exception as exc:
                 print(f"[WARN] 聊天历史写入不可用，已跳过持久化：{exc}", flush=True)
 
@@ -267,6 +269,58 @@ class RagService(object):
         }
         return RAG_SYSTEM_PROMPT.format(**prompt_inputs)
 
+    def _stringify_messages_for_summary(self, messages: list[BaseMessage]) -> str:
+        """把待摘要消息转成稳定的纯文本，便于交给模型压缩。"""
+        lines: list[str] = []
+        for msg in messages:
+            if isinstance(msg, HumanMessage):
+                role = "用户"
+            elif isinstance(msg, AIMessage):
+                role = "小衣"
+            else:
+                role = getattr(msg, "type", msg.__class__.__name__)
+            lines.append(f"{role}：{msg.content}")
+        return "\n".join(lines)
+
+    def _truncate_summary_text(self, summary_text: str) -> str:
+        """对摘要做硬截断，避免模型不遵守长度要求时无限增长。"""
+        cleaned_text = summary_text.strip()
+        max_chars = int(config.chat_history_summary_max_chars)
+        if len(cleaned_text) <= max_chars:
+            return cleaned_text
+        suffix = "\n（摘要因长度限制已截断）"
+        allowed_length = max(0, max_chars - len(suffix))
+        return cleaned_text[:allowed_length].rstrip() + suffix
+
+    def summarize_chat_messages(self, previous_summary: str, messages_to_summarize: list[BaseMessage]) -> str:
+        """生成滚动聊天摘要。
+
+        参数:
+            previous_summary: 之前已经持久化的摘要文本。
+            messages_to_summarize: 本轮需要吸收入摘要的旧消息批次。
+        返回值:
+            合并旧摘要与本批旧消息后的新摘要文本。
+        """
+        if not messages_to_summarize:
+            return self._truncate_summary_text(previous_summary)
+
+        summary_prompt = (
+            "你是聊天记忆压缩器。请把“已有长期记忆”和“新增旧对话”压缩成一份稳定、可复用的长期用户画像。\n\n"
+            "要求：\n"
+            f"1. 输出目标是不超过 {config.chat_history_summary_target_chars} 字，必须主动压缩，不要把旧摘要和新内容简单累加。\n"
+            "2. 优先保留稳定、长期有价值的信息：身材信息、所在城市、风格偏好、禁忌、常见场景、鞋包配饰偏好。\n"
+            "3. 合并同类项，删除重复表达。允许舍弃一次性、低价值、已被更稳定偏好概括的细节。\n"
+            "4. 不要编造对话中没有出现的信息。\n"
+            "5. 使用中文、条目化输出，内容尽量按“身材/城市/风格/禁忌/场景/鞋包配饰”归类。\n"
+            f"6. 即使信息很多，也要压缩到不超过 {config.chat_history_summary_target_chars} 字附近。\n\n"
+            f"【已有长期记忆】\n{previous_summary or '暂无'}\n\n"
+            f"【新增旧对话】\n{self._stringify_messages_for_summary(messages_to_summarize)}\n\n"
+            "请输出压缩后的长期用户画像："
+        )
+        response = self.chat_model.invoke(summary_prompt)
+        content = response.content if hasattr(response, "content") else str(response)
+        return self._truncate_summary_text(str(content))
+
     def _get_session_history(self, config: Optional[dict]) -> tuple[str, list[BaseMessage]]:
         """读取聊天历史，并打印 Supabase 查询耗时。"""
         start_time = time.time()
@@ -282,7 +336,7 @@ class RagService(object):
             return session_id, messages
         try:
             history = FileChatMessageHistory(session_id=session_id)
-            messages = history.messages
+            messages = history.get_agent_messages()
             print(f"[PERF] RagService._get_session_history took {time.time() - start_time:.3f}s", flush=True)
             return session_id, messages
         except Exception as exc:
@@ -360,9 +414,11 @@ class RagService(object):
         answer = self._extract_answer_from_state(state)
 
         try:
-            FileChatMessageHistory(session_id=session_id).add_messages(
+            history = FileChatMessageHistory(session_id=session_id)
+            history.add_messages(
                 [HumanMessage(content=inputs.get("input", "")), AIMessage(content=answer)]
             )
+            history.maybe_update_summary(summary_updater=self.summarize_chat_messages)
         except Exception as exc:
             print(f"[WARN] 聊天历史写入不可用，已跳过持久化：{exc}", flush=True)
         return answer
