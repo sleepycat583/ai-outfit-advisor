@@ -4,8 +4,12 @@ langchain-chroma==0.1.4
 langchain-text-splitters>=0.0.1
 langgraph>=0.2.76,<0.3.0
 streamlit>=1.28.0
+# Streamlit 的 gzip middleware 尚未兼容 Starlette 1.4 的 GZipResponder 接口。
+starlette>=0.40,<1.4
 dashscope>=1.20.0
 pillow
+# Chroma 0.4.x 依赖 NumPy 1.x 的兼容行为。
+numpy<2
 chromadb==0.4.24
 protobuf==3.20.3
 supabase>=2.0.0

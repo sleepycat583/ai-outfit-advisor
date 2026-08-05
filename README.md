@@ -156,6 +156,18 @@ SUPABASE_URL="[https://xxxxxxxxxxxx.supabase.co](https://xxxxxxxxxxxx.supabase.c
 SUPABASE_KEY="eyJhbGciOiJIUzI1NiIsInR5c......"
 ```
 
+如果部署到 Streamlit Cloud，不要上传 `.env` 或 `.streamlit/secrets.toml`。打开应用的 `Settings -> Secrets`，填入以下 TOML 配置：
+
+```toml
+DASHSCOPE_API_KEY = "你的 DashScope API Key"
+SUPABASE_URL = "你的 Supabase 项目 URL"
+SUPABASE_KEY = "你的 Supabase anon key"
+```
+
+其中 `SUPABASE_KEY` 应使用 Supabase 项目 `Project Settings -> API` 中的 anon key，不要将 service role key 暴露给前端应用。
+
+修改 `requirements.txt` 或 Secrets 后，在 Streamlit Cloud 的应用菜单中选择 `Reboot app`；如果仍使用旧依赖缓存，请选择清除缓存后重新部署。
+
 第四步、启动服务
 
 环境配置完毕后，通过 Streamlit 启动项目主入口：
