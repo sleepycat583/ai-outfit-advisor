@@ -138,8 +138,17 @@ CREATE TABLE kb_documents (
     source TEXT NOT NULL,
     content TEXT NOT NULL,
     md5 TEXT NOT NULL,
-    created_at TEXT
+    created_at TEXT,
+    operator TEXT,
+    operator_id TEXT,
+    operator_name TEXT,
+    source_type TEXT DEFAULT 'user'
 );
+
+
+知识库上传者归属迁移：如果项目已部署过旧版本，请先在 Supabase SQL Editor 中执行
+`migrations/001_kb_uploader_attribution.sql`，再部署新代码。种子知识显示为“小曹（系统预置）”，
+用户上传内容显示实际登录用户名；无法关联到已删除用户的历史记录显示为“历史用户”。
 
 
 进入 Storage 菜单，创建一个名为 wardrobe-images 的 Bucket（存储桶），并将其设置为 Public（公开），以便网页端能够正常加载衣橱图片。

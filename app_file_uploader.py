@@ -16,9 +16,21 @@ def render_page():
     st.title("知识库更新服务")
 
     # session_state 初始化
-    if "service" not in st.session_state:
-        user_id = st.session_state.get("user_id", "")
-        st.session_state["service"] = KnowledgeBaseService(user_id=user_id)
+    user_id = st.session_state.get("user_id", "")
+    username = st.session_state.get("username", "")
+    service_identity = (user_id, username)
+    identity_changed = st.session_state.get("kb_service_identity") != service_identity
+    if (
+        "service" not in st.session_state
+        or identity_changed
+    ):
+        st.session_state["service"] = KnowledgeBaseService(
+            user_id=user_id,
+            username=username,
+        )
+        st.session_state["kb_service_identity"] = service_identity
+        st.session_state["uploaded_file_id"] = None
+        st.session_state["pasted_text_id"] = None
 
     if "uploaded_file_id" not in st.session_state:
         st.session_state["uploaded_file_id"] = None
@@ -138,11 +150,16 @@ def render_page():
             chunks = item["chunks"]
             ctime = item["create_time"]
             operator = item["operator"]
+            operator_label = (
+                f"{operator}（系统预置）"
+                if item.get("source_type") == "seed"
+                else operator
+            )
 
             col_left, col_right = st.columns([5, 1])
             with col_left:
                 st.markdown(f"**{source}**")
-                st.caption(f"{chunks} 段 · {ctime} · {operator}")
+                st.caption(f"{chunks} 段 · {ctime} · {operator_label}")
                 if st.session_state["del_confirm"] == source:
                     st.warning("⚠️ 确认删除？不可撤销")
             with col_right:
