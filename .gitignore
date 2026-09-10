@@ -213,6 +213,9 @@ __marimo__/
 # Streamlit
 .streamlit/
 
+# Supabase CLI runtime metadata
+supabase/.temp/
+
 # Diagnostics artifacts
 diagnostics/*.json
 

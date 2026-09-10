@@ -115,6 +115,9 @@ CREATE TABLE users (
 CREATE TABLE chat_messages (
     session_id TEXT PRIMARY KEY,
     messages TEXT NOT NULL,
+    recent_messages TEXT NOT NULL DEFAULT '[]',
+    summary TEXT NOT NULL DEFAULT '',
+    summary_message_count INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT
 );
 ```

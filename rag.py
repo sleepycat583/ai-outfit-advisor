@@ -232,32 +232,6 @@ class RagService(object):
         config["configurable"] = configurable
         return config
 
-    def _coerce_history_messages(self, raw_messages) -> list[BaseMessage]:
-        """把外部传入的历史消息转成 LangChain message 对象。
-
-        为什么这么做：Streamlit 页面里已经把当前会话消息保存在 session_state。
-        如果问答前还要再去 Supabase 读一遍聊天历史，就会多出一次同步网络等待。
-        这里允许优先复用内存里的历史，减少问答前的阻塞时间。
-        """
-        if not raw_messages:
-            return []
-
-        messages: list[BaseMessage] = []
-        for msg in raw_messages:
-            if isinstance(msg, BaseMessage):
-                messages.append(msg)
-                continue
-            if not isinstance(msg, dict):
-                continue
-
-            role = msg.get("role")
-            content = msg.get("content", "")
-            if role == "user":
-                messages.append(HumanMessage(content=content))
-            elif role == "assistant":
-                messages.append(AIMessage(content=content))
-        return messages
-
     def _build_system_prompt(self, inputs: dict) -> str:
         prompt_inputs = {
             "current_date": inputs.get("current_date", datetime.datetime.now().strftime("%Y年%m月%d日")),
@@ -358,14 +332,6 @@ class RagService(object):
         start_time = time.time()
         normalized_config = self._normalize_config(config)
         session_id = normalized_config["configurable"]["session_id"]
-        preloaded_history = normalized_config["configurable"].get("history_messages")
-        if preloaded_history is not None:
-            messages = self._coerce_history_messages(preloaded_history)
-            print(
-                f"[PERF] RagService._get_session_history took {time.time() - start_time:.3f}s (memory cache)",
-                flush=True,
-            )
-            return session_id, messages
         try:
             history = FileChatMessageHistory(session_id=session_id)
             messages = history.get_agent_messages()

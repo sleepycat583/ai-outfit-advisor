@@ -89,7 +89,7 @@ class FileChatMessageHistory(BaseChatMessageHistory):
         )
         print(f"[PERF] FileChatMessageHistory.messages took {time.time() - start_time:.3f}s", flush=True)
         if result.data:
-            return messages_from_dict(json.loads(result.data[0]["messages"]))
+            return self._load_json_messages(result.data[0].get("messages"))
         return []
 
     def get_agent_messages(self) -> list[BaseMessage]:

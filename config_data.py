@@ -1,6 +1,13 @@
 import os
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _load_dotenv(path: str = ".env") -> None:
     if not os.path.exists(path):
         return
@@ -45,6 +52,12 @@ chat_history_summary_batch_rounds = 10
 chat_history_summary_interval_rounds = 3
 chat_history_summary_target_chars = 600
 chat_history_summary_max_chars = 1200
+
+# Memory migration feature flags. Keep the legacy path as the production default
+# until the native Postgres-backed implementation has passed its rollout checks.
+MEMORY_BACKEND = os.getenv("MEMORY_BACKEND", "legacy").strip().lower()
+VECTOR_BACKEND = os.getenv("VECTOR_BACKEND", "chroma").strip().lower()
+MEMORY_DUAL_WRITE = _env_bool("MEMORY_DUAL_WRITE")
 
 # 摘要约束检测关键词配置
 # 用于识别用户消息中的明确约束,确保这些约束在摘要压缩时不被丢弃
