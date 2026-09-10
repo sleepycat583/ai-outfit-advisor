@@ -20,6 +20,9 @@ import config_data as config
 from supabase_config import get_supabase_client
 
 SEEDS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seeds")
+SYSTEM_OPERATOR_ID = "system"
+HISTORICAL_OPERATOR_NAME = "历史用户"
+METADATA_VERSION = 2
 
 
 def get_string_md5(input_str: str, encoding: str = "utf-8") -> str:
@@ -32,8 +35,9 @@ def get_string_md5(input_str: str, encoding: str = "utf-8") -> str:
 class KnowledgeBaseService(object):
     """知识库服务：Chroma 向量检索 + Supabase 内容持久化。"""
 
-    def __init__(self, user_id: str = ""):
+    def __init__(self, user_id: str = "", username: str | None = None):
         self.user_id = user_id
+        self.username = username.strip() if username and username.strip() else None
         self.supabase = get_supabase_client()
 
         persist_dir = (
@@ -79,6 +83,7 @@ class KnowledgeBaseService(object):
         2. 否则：导入 seeds/ + 从 Supabase 恢复用户上传内容
         """
         if self._collection_count() > 0:
+            self._migrate_chroma_metadata()
             return
 
         # Step 1: 导入种子知识
@@ -120,14 +125,25 @@ class KnowledgeBaseService(object):
             metadata = {
                 "source": f"[种子] {filename}",
                 "create_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "operator_id": SYSTEM_OPERATOR_ID,
+                "operator_name": config.DEFAULT_OPERATOR,
                 "operator": config.DEFAULT_OPERATOR,
+                "source_type": "seed",
+                "metadata_version": METADATA_VERSION,
             }
 
             self.chroma.add_texts(
                 chunks,
                 metadatas=[metadata for _ in chunks],
             )
-            self._md5_save(md5_hex, f"[种子] {filename}", content)
+            self._md5_save(
+                md5_hex,
+                f"[种子] {filename}",
+                content,
+                operator_id=SYSTEM_OPERATOR_ID,
+                operator_name=config.DEFAULT_OPERATOR,
+                source_type="seed",
+            )
             imported += 1
 
         if imported > 0:
@@ -148,7 +164,7 @@ class KnowledgeBaseService(object):
         restored = 0
         for row in result.data:
             content = row.get("content", "")
-            source = row.get("source", "")
+            source = row.get("source", "") or ""
             if not content:
                 continue
 
@@ -157,11 +173,11 @@ class KnowledgeBaseService(object):
             else:
                 chunks = [content]
 
-            metadata = {
-                "source": source,
-                "create_time": row.get("created_at", ""),
-                "operator": config.DEFAULT_OPERATOR,
-            }
+            # 种子记录可能已经由 _import_seeds 写入当前 Chroma，避免重建时重复添加。
+            if self._is_seed_source(source) and self._source_exists(source):
+                continue
+
+            metadata = self._document_metadata(row)
 
             self.chroma.add_texts(
                 chunks,
@@ -186,7 +202,16 @@ class KnowledgeBaseService(object):
         )
         return bool(result.data)
 
-    def _md5_save(self, md5_str: str, source: str, content: str) -> None:
+    def _md5_save(
+        self,
+        md5_str: str,
+        source: str,
+        content: str,
+        *,
+        operator_id: str,
+        operator_name: str,
+        source_type: str,
+    ) -> None:
         self.supabase.table("kb_documents").insert(
             {
                 "user_id": self.user_id,
@@ -194,14 +219,116 @@ class KnowledgeBaseService(object):
                 "content": content,
                 "md5": md5_str,
                 "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "operator_id": operator_id,
+                "operator_name": operator_name,
+                "operator": operator_name,
+                "source_type": source_type,
             }
         ).execute()
+
+    # ------------------------------------------------------------------
+    # 上传者元数据
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_seed_source(source: str) -> bool:
+        return source.startswith("[种子]")
+
+    def _lookup_username(self, user_id: str) -> str | None:
+        """从用户表解析用户名；历史用户被删除时返回 None。"""
+        if user_id == self.user_id and self.username:
+            return self.username
+
+        try:
+            result = (
+                self.supabase.table("users")
+                .select("username")
+                .eq("id", user_id)
+                .execute()
+            )
+        except Exception:
+            return None
+
+        if result.data:
+            username = result.data[0].get("username")
+            return username.strip() if username and username.strip() else None
+        return None
+
+    def _document_metadata(self, row: dict) -> dict:
+        """将新旧 Supabase 记录统一转换为 Chroma 元数据。"""
+        source = row.get("source", "")
+        created_at = row.get("created_at", "")
+        source_type = row.get("source_type") or (
+            "seed" if self._is_seed_source(source) else "user"
+        )
+
+        if source_type == "seed" or self._is_seed_source(source):
+            operator_id = SYSTEM_OPERATOR_ID
+            operator_name = config.DEFAULT_OPERATOR
+            source_type = "seed"
+        else:
+            operator_id = row.get("operator_id") or row.get("user_id") or self.user_id
+            operator_name = row.get("operator_name")
+            if not operator_name or operator_name == config.DEFAULT_OPERATOR:
+                operator_name = self._lookup_username(operator_id)
+            operator_name = operator_name or HISTORICAL_OPERATOR_NAME
+
+        return {
+            "source": source,
+            "create_time": created_at,
+            "operator_id": operator_id,
+            "operator_name": operator_name,
+            "operator": operator_name,
+            "source_type": source_type,
+            "metadata_version": METADATA_VERSION,
+        }
+
+    def _source_exists(self, source: str) -> bool:
+        try:
+            result = self.chroma.get(where={"source": source}, limit=1)
+            return bool(result.get("ids", []))
+        except Exception:
+            return False
+
+    def _migrate_chroma_metadata(self) -> None:
+        """将旧索引中缺失作者字段或错误作者的元数据升级到 v2。"""
+        result = self.chroma.get(include=["metadatas"])
+        ids = result.get("ids", [])
+        metadatas = result.get("metadatas", [])
+        update_ids = []
+        update_metadatas = []
+
+        for chunk_id, metadata in zip(ids, metadatas):
+            metadata = metadata or {}
+            if metadata.get("metadata_version", 0) >= METADATA_VERSION:
+                continue
+
+            upgraded = self._document_metadata(
+                {
+                    "source": metadata.get("source", ""),
+                    "created_at": metadata.get("create_time", ""),
+                    "user_id": self.user_id,
+                    "operator": metadata.get("operator", ""),
+                }
+            )
+            update_ids.append(chunk_id)
+            update_metadatas.append(upgraded)
+
+        if update_ids:
+            # LangChain 的 Chroma 封装没有 update 方法，元数据迁移需调用原生 collection API。
+            self.chroma._collection.update(
+                ids=update_ids,
+                metadatas=update_metadatas,
+            )
 
     # ------------------------------------------------------------------
     # 公共 API
     # ------------------------------------------------------------------
 
     def upload_by_str(self, data: str, filename: str) -> str:
+        if not self.user_id or not self.username:
+            raise ValueError("知识库上传需要已登录的用户身份")
+
         md5_hex = get_string_md5(data)
 
         if self._md5_exists(md5_hex):
@@ -215,7 +342,11 @@ class KnowledgeBaseService(object):
         metadata = {
             "source": filename,
             "create_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "operator": config.DEFAULT_OPERATOR,
+            "operator_id": self.user_id,
+            "operator_name": self.username,
+            "operator": self.username,
+            "source_type": "user",
+            "metadata_version": METADATA_VERSION,
         }
 
         self.chroma.add_texts(
@@ -224,7 +355,14 @@ class KnowledgeBaseService(object):
         )
 
         # 持久化到 Supabase，确保容器重启后可恢复
-        self._md5_save(md5_hex, filename, data)
+        self._md5_save(
+            md5_hex,
+            filename,
+            data,
+            operator_id=self.user_id,
+            operator_name=self.username,
+            source_type="user",
+        )
 
         return "[成功]内容已经成功载入向量库"
 
@@ -245,11 +383,20 @@ class KnowledgeBaseService(object):
                     "chunks": 0,
                     "create_time": "",
                     "operator": "",
+                    "source_type": "user",
                 }
             source_map[source]["chunks"] += 1
             if meta:
                 source_map[source]["create_time"] = meta.get("create_time", "")
-                source_map[source]["operator"] = meta.get("operator", "")
+                source_type = meta.get("source_type") or (
+                    "seed" if self._is_seed_source(source) else "user"
+                )
+                source_map[source]["source_type"] = source_type
+                source_map[source]["operator"] = (
+                    meta.get("operator_name")
+                    or meta.get("operator")
+                    or HISTORICAL_OPERATOR_NAME
+                )
 
         sources = sorted(source_map.values(), key=lambda x: x["create_time"], reverse=True)
 
@@ -293,5 +440,4 @@ class KnowledgeBaseService(object):
 
 if __name__ == "__main__":
     service = KnowledgeBaseService()
-    r = service.upload_by_str("周杰伦", "testfile")
-    print(r)
+    print(service.get_stats())

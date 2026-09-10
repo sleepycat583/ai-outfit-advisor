@@ -269,8 +269,36 @@ class RagService(object):
         }
         return RAG_SYSTEM_PROMPT.format(**prompt_inputs)
 
+    def _detect_constraint_message(self, message: BaseMessage) -> bool:
+        """检测消息是否包含用户约束类表述。
+
+        参数:
+            message: 待检测的消息对象。
+        返回值:
+            True 表示该消息包含约束关键词，需要在摘要时优先保留。
+        """
+        if not isinstance(message, HumanMessage):
+            return False
+
+        content = str(message.content).lower()
+
+        # 检测显式否定约束关键词
+        for keyword in config.constraint_keywords_negative:
+            if keyword in content:
+                return True
+
+        # 检测身材相关约束关键词
+        for keyword in config.constraint_keywords_body:
+            if keyword in content:
+                return True
+
+        return False
+
     def _stringify_messages_for_summary(self, messages: list[BaseMessage]) -> str:
-        """把待摘要消息转成稳定的纯文本，便于交给模型压缩。"""
+        """把待摘要消息转成稳定的纯文本，便于交给模型压缩。
+
+        对包含约束关键词的消息添加标注，提示模型优先保留。
+        """
         lines: list[str] = []
         for msg in messages:
             if isinstance(msg, HumanMessage):
@@ -279,7 +307,10 @@ class RagService(object):
                 role = "小衣"
             else:
                 role = getattr(msg, "type", msg.__class__.__name__)
-            lines.append(f"{role}：{msg.content}")
+
+            # 为约束类消息添加显式标注
+            prefix = "【用户明确约束】" if self._detect_constraint_message(msg) else ""
+            lines.append(f"{prefix}{role}：{msg.content}")
         return "\n".join(lines)
 
     def _truncate_summary_text(self, summary_text: str) -> str:
@@ -305,14 +336,15 @@ class RagService(object):
             return self._truncate_summary_text(previous_summary)
 
         summary_prompt = (
-            "你是聊天记忆压缩器。请把“已有长期记忆”和“新增旧对话”压缩成一份稳定、可复用的长期用户画像。\n\n"
+            "你是聊天记忆压缩器。请把「已有长期记忆」和「新增旧对话」压缩成一份稳定、可复用的长期用户画像。\n\n"
             "要求：\n"
             f"1. 输出目标是不超过 {config.chat_history_summary_target_chars} 字，必须主动压缩，不要把旧摘要和新内容简单累加。\n"
             "2. 优先保留稳定、长期有价值的信息：身材信息、所在城市、风格偏好、禁忌、常见场景、鞋包配饰偏好。\n"
             "3. 合并同类项，删除重复表达。允许舍弃一次性、低价值、已被更稳定偏好概括的细节。\n"
             "4. 不要编造对话中没有出现的信息。\n"
-            "5. 使用中文、条目化输出，内容尽量按“身材/城市/风格/禁忌/场景/鞋包配饰”归类。\n"
-            f"6. 即使信息很多，也要压缩到不超过 {config.chat_history_summary_target_chars} 字附近。\n\n"
+            "5. 使用中文、条目化输出，内容尽量按「身材/城市/风格/禁忌/场景/鞋包配饰」归类。\n"
+            f"6. 即使信息很多，也要压缩到不超过 {config.chat_history_summary_target_chars} 字附近。\n"
+            "7. **关键规则**：对话中标注【用户明确约束】的消息（如「不穿XX」、「腿粗」等），必须完整保留到摘要的「禁忌」或「身材」分类中，不得删除或弱化表述。\n\n"
             f"【已有长期记忆】\n{previous_summary or '暂无'}\n\n"
             f"【新增旧对话】\n{self._stringify_messages_for_summary(messages_to_summarize)}\n\n"
             "请输出压缩后的长期用户画像："
