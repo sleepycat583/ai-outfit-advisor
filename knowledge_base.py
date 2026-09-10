@@ -315,7 +315,11 @@ class KnowledgeBaseService(object):
             update_metadatas.append(upgraded)
 
         if update_ids:
-            self.chroma.update(ids=update_ids, metadatas=update_metadatas)
+            # LangChain 的 Chroma 封装没有 update 方法，元数据迁移需调用原生 collection API。
+            self.chroma._collection.update(
+                ids=update_ids,
+                metadatas=update_metadatas,
+            )
 
     # ------------------------------------------------------------------
     # 公共 API

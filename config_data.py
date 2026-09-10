@@ -46,6 +46,17 @@ chat_history_summary_interval_rounds = 3
 chat_history_summary_target_chars = 600
 chat_history_summary_max_chars = 1200
 
+# 摘要约束检测关键词配置
+# 用于识别用户消息中的明确约束,确保这些约束在摘要压缩时不被丢弃
+constraint_keywords_negative = [
+    "不穿", "不喜欢", "不要", "避免", "禁忌", "讨厌", "不适合",
+    "不能", "别", "拒绝", "排斥", "反感", "不接受"
+]
+constraint_keywords_body = [
+    "腿粗", "显胖", "显矮", "肩宽", "驼背", "小个子", "梨形身材",
+    "苹果型", "腿短", "胯宽", "手臂粗", "脖子短"
+]
+
 session_config = {
     "configurable": {
         "session_id": "user_001",
