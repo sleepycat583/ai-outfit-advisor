@@ -11,6 +11,7 @@ from langchain_community.embeddings import DashScopeEmbeddings
 from rag import RagService, ConsoleLoggingHandler, FALLBACK_MESSAGE
 from vector_store_service import VectorWardrobeService
 from wardrobe_service import WardrobeService
+from conversation_service import ConversationRepository
 
 
 # 诊断统计：记录一次 render_page() 内图片 Base64 处理的总调用次数与耗时。
@@ -593,8 +594,18 @@ def render_page():
         )
         perf_log("app_qa rag init", rag_start)
 
-    if "session_id" not in st.session_state:
-        st.session_state["session_id"] = f"chat_session_{user_id}"
+    if "conversation_id" not in st.session_state:
+        try:
+            st.session_state["conversation_id"] = ConversationRepository(
+                schema=config.MEMORY_PRIVATE_SCHEMA
+            ).ensure(user_id)
+        except Exception as exc:
+            # The UI remains usable during a database rollout; native runtime
+            # will independently decide whether to enable PostgresSaver.
+            st.session_state["conversation_id"] = ConversationRepository.legacy_id(user_id)
+            print(f"[WARN] conversation registry unavailable; using legacy id: {exc}", flush=True)
+    # session_id remains as a compatibility alias for older callers.
+    st.session_state["session_id"] = st.session_state["conversation_id"]
 
     if "wardrobe_draft" not in st.session_state:
         st.session_state["wardrobe_draft"] = None
@@ -758,7 +769,8 @@ def render_page():
                             },
                             config={
                                 "configurable": {
-                                    "session_id": st.session_state["session_id"],
+                                    "conversation_id": st.session_state["conversation_id"],
+                                    "session_id": st.session_state["conversation_id"],
                                 },
                                 "callbacks": [ConsoleLoggingHandler()],
                             },

@@ -52,5 +52,23 @@ def _get_credentials() -> tuple[str, str]:
     )
 
 
+def get_database_url() -> str | None:
+    """读取仅供服务端使用的 PostgreSQL 连接串。
+
+    不回退到 ``SUPABASE_URL``：PostgresSaver 必须使用数据库连接串，且该
+    密钥不应出现在前端或匿名 Data API 请求中。
+    """
+    try:
+        import streamlit as st
+
+        value = st.secrets.get("SUPABASE_DB_URL")
+        if value:
+            return str(value).strip()
+    except Exception:
+        pass
+    value = os.environ.get("SUPABASE_DB_URL")
+    return value.strip() if value else None
+
+
 # Storage bucket 名称
 WARDROBE_BUCKET = "wardrobe-images"

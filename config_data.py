@@ -57,7 +57,12 @@ chat_history_summary_max_chars = 1200
 # until the native Postgres-backed implementation has passed its rollout checks.
 MEMORY_BACKEND = os.getenv("MEMORY_BACKEND", "legacy").strip().lower()
 VECTOR_BACKEND = os.getenv("VECTOR_BACKEND", "chroma").strip().lower()
-MEMORY_DUAL_WRITE = _env_bool("MEMORY_DUAL_WRITE")
+# Native checkpoint rollouts keep the legacy transcript in sync so that a
+# failed Postgres connection can be rolled back without losing the UI history.
+# The default is intentionally conservative for the existing legacy backend.
+MEMORY_DUAL_WRITE = _env_bool("MEMORY_DUAL_WRITE", default=MEMORY_BACKEND == "native")
+MEMORY_NATIVE_FALLBACK = _env_bool("MEMORY_NATIVE_FALLBACK", default=True)
+MEMORY_PRIVATE_SCHEMA = os.getenv("MEMORY_PRIVATE_SCHEMA", "app_private").strip() or "app_private"
 
 # 摘要约束检测关键词配置
 # 用于识别用户消息中的明确约束,确保这些约束在摘要压缩时不被丢弃

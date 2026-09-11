@@ -10,6 +10,15 @@
 > Queue/Cron 和 pgvector 仍按后续阶段推进，当前生产默认仍由 feature flag 使用 legacy
 > Supabase 聊天历史。
 
+阶段三已加入原生 checkpoint 适配层：配置 `MEMORY_BACKEND=native` 与服务端
+`SUPABASE_DB_URL` 后，`RagService` 会使用 `PostgresSaver`，并将
+`conversation_id` 规范化为 LangGraph `thread_id`。连接通过
+`MEMORY_PRIVATE_SCHEMA` 的 `search_path` 写入私有 schema；原生连接失败时，
+`MEMORY_NATIVE_FALLBACK=true`（默认）会回退到 legacy transcript。现有 UI
+仍保留完整历史双写/清理路径，便于灰度回滚。迁移脚本
+`supabase/migrations/20260911100000_native_memory_private_schema.sql` 为幂等，
+会建立会话注册表和官方 saver 表结构；未配置真实 Supabase DB 时不会执行线上迁移。
+
 ---
 
 ## 1. 为什么要做这次迁移

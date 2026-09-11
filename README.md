@@ -156,6 +156,22 @@ CREATE TABLE kb_documents (
 首次回填产生的超长 `recent_messages`，不会删除完整 transcript。若历史 JSON 损坏，迁移
 会将 Agent 窗口降级为空数组，避免阻断整批迁移。
 
+原生 LangGraph memory（阶段三）执行
+`supabase/migrations/20260911100000_native_memory_private_schema.sql` 后，可通过以下
+服务端开关灰度启用：
+
+```text
+MEMORY_BACKEND=native
+MEMORY_NATIVE_FALLBACK=true
+MEMORY_DUAL_WRITE=true
+MEMORY_PRIVATE_SCHEMA=app_private
+SUPABASE_DB_URL=postgresql://...   # 仅服务端 Secret，不进入前端或仓库
+```
+
+`conversation_id` 是多会话主键，并直接作为 LangGraph `thread_id`。原生 checkpoint
+连接失败会回退到 legacy 链路；会话清理只删除 checkpoint 与 transcript，不会级联删除长期记忆。
+私有 schema 默认撤销 `anon`/`authenticated` 权限，不能通过 Supabase Data API 访问。
+
 
 知识库上传者归属迁移：如果项目已部署过旧版本，请先在 Supabase SQL Editor 中执行
 `migrations/001_kb_uploader_attribution.sql`，再部署新代码。种子知识显示为“小曹（系统预置）”，
@@ -174,6 +190,7 @@ DASHSCOPE_API_KEY="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
 # Supabase 项目 URL 和匿名 API Key (在 Project Settings -> API 中获取)
 SUPABASE_URL="[https://xxxxxxxxxxxx.supabase.co](https://xxxxxxxxxxxx.supabase.co)"
 SUPABASE_KEY="eyJhbGciOiJIUzI1NiIsInR5c......"
+SUPABASE_DB_URL="postgresql://..."  # 仅启用 native memory 时配置，严禁暴露给浏览器
 ```
 
 如果部署到 Streamlit Cloud，不要上传 `.env` 或 `.streamlit/secrets.toml`。打开应用的 `Settings -> Secrets`，填入以下 TOML 配置：
@@ -182,6 +199,7 @@ SUPABASE_KEY="eyJhbGciOiJIUzI1NiIsInR5c......"
 DASHSCOPE_API_KEY = "你的 DashScope API Key"
 SUPABASE_URL = "你的 Supabase 项目 URL"
 SUPABASE_KEY = "你的 Supabase anon key"
+SUPABASE_DB_URL = "你的 Supabase DB URL（仅服务端 Secret）"
 ```
 
 其中 `SUPABASE_KEY` 应使用 Supabase 项目 `Project Settings -> API` 中的 anon key，不要将 service role key 暴露给前端应用。

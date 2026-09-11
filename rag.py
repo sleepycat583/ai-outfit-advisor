@@ -15,8 +15,12 @@ from vector_store_service import VectorStoreService, VectorWardrobeService
 from prompts import RAG_SYSTEM_PROMPT, WEEKLY_PLAN_PROMPT
 from langchain_community.embeddings import DashScopeEmbeddings
 import config_data as config
+import config_data as app_config
 from langchain_community.chat_models.tongyi import ChatTongyi
 from langchain_community.tools import DuckDuckGoSearchRun
+
+from native_memory import NativeMemoryRuntime, native_memory_requested
+from conversation_service import ConversationRepository
 
 
 class OOTDItem(BaseModel):
@@ -44,6 +48,7 @@ TOOL_EVENT_LABELS = {
     "weather_search": ("🌤️", "正在观测天象", "查询天气"),
     "knowledge_base_search": ("📚", "正在翻阅时尚秘籍", "检索穿搭知识"),
 }
+_CHECKPOINTER_UNSET = object()
 
 
 class ConsoleLoggingHandler(BaseCallbackHandler):
@@ -117,6 +122,18 @@ class RagService(object):
         start_time = time.time()
         self.vector_wardrobe = vector_wardrobe
         self.user_id = user_id
+        self.conversation_repo = ConversationRepository(schema=config.MEMORY_PRIVATE_SCHEMA)
+        self.native_memory = None
+        self.checkpointer = None
+        if native_memory_requested():
+            try:
+                self.native_memory = NativeMemoryRuntime.connect(user_id=user_id)
+                self.checkpointer = self.native_memory.checkpointer
+                print("[MEMORY] native PostgresSaver enabled", flush=True)
+            except Exception as exc:
+                if config.MEMORY_BACKEND == "native" and not config.MEMORY_NATIVE_FALLBACK:
+                    raise
+                print(f"[WARN] native PostgresSaver unavailable; using legacy memory: {exc}", flush=True)
 
         self.vector_service = VectorStoreService(
             embedding=DashScopeEmbeddings(model=config.EMBEDDING_MODEL_NAME),
@@ -126,6 +143,7 @@ class RagService(object):
         self.chat_model = ChatTongyi(model=config.chat_model_name)
 
         self.chain = self.__get_chain()
+        self.legacy_chain = self.__get_chain(checkpointer=None) if self.checkpointer is not None else self.chain
         print(f"[PERF] RagService.__init__ took {time.time() - start_time:.3f}s", flush=True)
 
     def _with_current_date(self, inputs: dict) -> dict:
@@ -167,12 +185,18 @@ class RagService(object):
 
     def stream_events(self, inputs: dict, config: Optional[dict] = None):
         """以 LangGraph 事件流驱动 UI 状态展示，同时保持最终答案兼容。"""
+        prepared_inputs = None
+        normalized_config = None
         try:
             total_start = time.time()
             prepared_inputs = self._prepare_inputs(inputs)
             normalized_config = self._normalize_config(config)
             session_id, history_messages = self._get_session_history(normalized_config)
-            graph_inputs = self._build_graph_inputs(prepared_inputs, history_messages)
+            graph_inputs = self._build_graph_inputs(
+                prepared_inputs,
+                history_messages,
+                include_system=not self._native_has_checkpoint(normalized_config),
+            )
 
             yield {"type": "status", "label": "🤔 正在理解你的需求，构思搭配方向..."}
 
@@ -192,17 +216,37 @@ class RagService(object):
 
             answer = self._extract_answer_from_state(last_state)
             try:
-                history = FileChatMessageHistory(session_id=session_id)
-                history.add_messages(
-                    [HumanMessage(content=prepared_inputs.get("input", "")), AIMessage(content=answer)]
+                storage_session_id = (
+                    ConversationRepository.legacy_session_id(session_id)
+                    if self.checkpointer is not None
+                    else session_id
                 )
-                history.maybe_update_summary(summary_updater=self.summarize_chat_messages)
+                if self._should_write_legacy():
+                    history = FileChatMessageHistory(session_id=storage_session_id)
+                    history.add_messages(
+                        [HumanMessage(content=prepared_inputs.get("input", "")), AIMessage(content=answer)]
+                    )
+                    history.maybe_update_summary(summary_updater=self.summarize_chat_messages)
             except Exception as exc:
                 print(f"[WARN] 聊天历史写入不可用，已跳过持久化：{exc}", flush=True)
 
             print(f"[PERF] RagService.stream_events total took {time.time() - total_start:.3f}s", flush=True)
             yield {"type": "answer", "content": answer}
-        except Exception:
+        except Exception as exc:
+            if (
+                self.checkpointer is not None
+                and app_config.MEMORY_NATIVE_FALLBACK
+                and prepared_inputs is not None
+                and normalized_config is not None
+            ):
+                try:
+                    answer = self._invoke_legacy_graph(prepared_inputs, normalized_config)
+                    yield {"type": "status", "label": "⚠️ 原生记忆暂不可用，已安全回退"}
+                    yield {"type": "answer", "content": answer}
+                    return
+                except Exception as fallback_exc:
+                    print(f"[WARN] native and legacy graph fallback failed: {fallback_exc}", flush=True)
+            print(f"[WARN] RagService.stream_events failed: {exc}", flush=True)
             yield {"type": "error", "content": FALLBACK_MESSAGE}
 
     def invoke(self, inputs: dict, config: Optional[dict] = None):
@@ -223,13 +267,30 @@ class RagService(object):
     def _normalize_config(self, config: Optional[dict] = None) -> dict:
         config = dict(config or {})
         configurable = dict(config.get("configurable") or {})
-        session_id = configurable.get("session_id") or configurable.get("thread_id")
+        session_id = (
+            configurable.get("conversation_id")
+            or configurable.get("session_id")
+            or configurable.get("thread_id")
+        )
         if not session_id:
-            session_id = f"chat_session_{self.user_id}" if self.user_id else "default_session"
-        configurable.setdefault("thread_id", session_id)
-        configurable.setdefault("session_id", session_id)
+            if self.user_id and native_memory_requested():
+                session_id = ConversationRepository.legacy_id(self.user_id)
+            else:
+                session_id = f"chat_session_{self.user_id}" if self.user_id else "default_session"
+        if getattr(self, "checkpointer", None) is not None and self.user_id:
+            self.conversation_repo.ensure(self.user_id, session_id)
+        # conversation_id is the sole canonical identity.  Never preserve a
+        # conflicting caller-supplied thread_id: the repository validates this
+        # id before LangGraph receives it.
+        configurable["thread_id"] = session_id
+        configurable["session_id"] = session_id
+        configurable["conversation_id"] = session_id
         config["configurable"] = configurable
         return config
+
+    def _should_write_legacy(self) -> bool:
+        """决定是否继续写旧 transcript，支持 native 灰度回滚。"""
+        return getattr(self, "checkpointer", None) is None or config.MEMORY_DUAL_WRITE
 
     def _build_system_prompt(self, inputs: dict) -> str:
         prompt_inputs = {
@@ -331,8 +392,18 @@ class RagService(object):
         start_time = time.time()
         normalized_config = self._normalize_config(config)
         session_id = normalized_config["configurable"]["session_id"]
+        if getattr(self, "checkpointer", None) is not None:
+            # 首次迁移的 thread 尚无 checkpoint 时导入 legacy 窗口一次；
+            # 后续完全由 saver 管理，避免每轮重复追加 transcript。
+            if self._native_has_checkpoint(normalized_config):
+                return session_id, []
         try:
-            history = FileChatMessageHistory(session_id=session_id)
+            storage_session_id = (
+                ConversationRepository.legacy_session_id(session_id)
+                if getattr(self, "checkpointer", None) is not None
+                else session_id
+            )
+            history = FileChatMessageHistory(session_id=storage_session_id)
             messages = history.get_agent_messages()
             print(f"[PERF] RagService._get_session_history took {time.time() - start_time:.3f}s", flush=True)
             return session_id, messages
@@ -340,6 +411,21 @@ class RagService(object):
             print(f"[WARN] 聊天历史读取不可用，已使用空历史：{exc}", flush=True)
             print(f"[PERF] RagService._get_session_history took {time.time() - start_time:.3f}s", flush=True)
             return session_id, []
+
+    def _native_has_checkpoint(self, normalized_config: dict) -> bool:
+        """判断原生 checkpoint 是否已有该 thread 的状态。
+
+        首次调用需要写入动态系统提示；后续调用由 LangGraph checkpoint
+        恢复既有消息，避免重复追加 system message。查询失败时按首次调用
+        处理，让 saver 自身决定是否可以继续，且不影响 legacy 回退路径。
+        """
+        if getattr(self, "checkpointer", None) is None:
+            return False
+        try:
+            return self.checkpointer.get_tuple(normalized_config) is not None
+        except Exception as exc:
+            print(f"[WARN] native checkpoint lookup failed; treating as new thread: {exc}", flush=True)
+            return False
 
     def _extract_answer_from_state(self, state) -> str:
         messages = []
@@ -391,33 +477,81 @@ class RagService(object):
             return f"{emoji} {verb}（{noun}）：{query}"
         return f"{emoji} {verb}..."
 
-    def _build_graph_inputs(self, inputs: dict, history_messages: list[BaseMessage]) -> dict:
+    def _build_graph_inputs(
+        self,
+        inputs: dict,
+        history_messages: list[BaseMessage],
+        *,
+        include_system: bool = True,
+    ) -> dict:
         system_prompt = self._build_system_prompt(inputs)
-        return {
-            "messages": [
-                SystemMessage(content=system_prompt),
-                SystemMessage(content="以下是你们的历史对话记录："),
-                *history_messages,
-                HumanMessage(content=inputs.get("input", "")),
-            ]
-        }
+        messages = [SystemMessage(content=system_prompt)] if include_system else []
+        if getattr(self, "checkpointer", None) is None or history_messages:
+            messages.append(SystemMessage(content="以下是你们的历史对话记录："))
+            messages.extend(history_messages)
+        messages.append(HumanMessage(content=inputs.get("input", "")))
+        return {"messages": messages}
 
     def _invoke_graph(self, inputs: dict, config: Optional[dict] = None) -> str:
         normalized_config = self._normalize_config(config)
         session_id, history_messages = self._get_session_history(normalized_config)
-        graph_inputs = self._build_graph_inputs(inputs, history_messages)
+        graph_inputs = self._build_graph_inputs(
+            inputs,
+            history_messages,
+            include_system=not self._native_has_checkpoint(normalized_config),
+        )
 
-        state = self.chain.invoke(graph_inputs, config=normalized_config)
+        try:
+            state = self.chain.invoke(graph_inputs, config=normalized_config)
+        except Exception as exc:
+            if self.checkpointer is None or not app_config.MEMORY_NATIVE_FALLBACK:
+                raise
+            print(f"[WARN] native graph failed; using legacy chain: {exc}", flush=True)
+            return self._invoke_legacy_graph(inputs, normalized_config)
         answer = self._extract_answer_from_state(state)
 
         try:
-            history = FileChatMessageHistory(session_id=session_id)
-            history.add_messages(
-                [HumanMessage(content=inputs.get("input", "")), AIMessage(content=answer)]
+            storage_session_id = (
+                ConversationRepository.legacy_session_id(session_id)
+                if self.checkpointer is not None
+                else session_id
             )
-            history.maybe_update_summary(summary_updater=self.summarize_chat_messages)
+            if self._should_write_legacy():
+                history = FileChatMessageHistory(session_id=storage_session_id)
+                history.add_messages(
+                    [HumanMessage(content=inputs.get("input", "")), AIMessage(content=answer)]
+                )
+                history.maybe_update_summary(summary_updater=self.summarize_chat_messages)
         except Exception as exc:
             print(f"[WARN] 聊天历史写入不可用，已跳过持久化：{exc}", flush=True)
+        return answer
+
+    def _invoke_legacy_graph(self, inputs: dict, normalized_config: dict) -> str:
+        """在 native checkpoint 失败时执行一次无 checkpoint 的兼容链。"""
+        session_id = normalized_config["configurable"]["session_id"]
+        storage_session_id = (
+            ConversationRepository.legacy_session_id(session_id)
+            if getattr(self, "checkpointer", None) is not None
+            else session_id
+        )
+        try:
+            history_messages = FileChatMessageHistory(session_id=storage_session_id).get_agent_messages()
+        except Exception:
+            history_messages = []
+        graph_inputs = self._build_graph_inputs(
+            inputs,
+            history_messages,
+            include_system=True,
+        )
+        legacy_chain = getattr(self, "legacy_chain", self.chain)
+        state = legacy_chain.invoke(graph_inputs, config=normalized_config)
+        answer = self._extract_answer_from_state(state)
+        try:
+            history = FileChatMessageHistory(session_id=storage_session_id)
+            history.add_messages([HumanMessage(content=inputs.get("input", "")), AIMessage(content=answer)])
+            history.maybe_update_summary(summary_updater=self.summarize_chat_messages)
+        except Exception as exc:
+            print(f"[WARN] legacy fallback history write failed: {exc}", flush=True)
         return answer
 
     def _weather_search(self, query: str) -> str:
@@ -543,7 +677,7 @@ class RagService(object):
             data = json.loads(content_text)
             return data.get("days", data if isinstance(data, list) else [])
 
-    def __get_chain(self):
+    def __get_chain(self, checkpointer=_CHECKPOINTER_UNSET):
         """获取 LangGraph ReAct Agent，并打印组装工具链耗时。"""
         start_time = time.time()
         retriever = self.vector_service.get_retriever()
@@ -566,7 +700,15 @@ class RagService(object):
             "当用户询问关于服装洗涤、尺码推荐、颜色搭配等通用穿搭知识时，必须使用此工具。",
         )
         tools = [search_tool, retriever_tool]
-        chain = create_agent_factory(model=self.chat_model, tools=tools)
+        chain = create_agent_factory(
+            model=self.chat_model,
+            tools=tools,
+            checkpointer=(
+                getattr(self, "checkpointer", None)
+                if checkpointer is _CHECKPOINTER_UNSET
+                else checkpointer
+            ),
+        )
         print(f"[PERF] RagService.__get_chain took {time.time() - start_time:.3f}s", flush=True)
         return chain
 

@@ -4,6 +4,8 @@ AI 穿搭顾问 - 综合应用
 
 import streamlit as st
 from user_service import UserService
+from conversation_service import ConversationRepository
+import config_data as config
 
 
 @st.cache_data(show_spinner=False, ttl=60)
@@ -171,6 +173,49 @@ with col2:
 
 st.sidebar.divider()
 
+# ===== 多会话切换（native rollout） =====
+conversation_repo = ConversationRepository(schema=config.MEMORY_PRIVATE_SCHEMA)
+if "conversation_id" not in st.session_state:
+    try:
+        st.session_state["conversation_id"] = conversation_repo.ensure(user_id)
+    except Exception as exc:
+        st.session_state["conversation_id"] = conversation_repo.legacy_id(user_id)
+        print(f"[WARN] conversation initialization failed: {exc}", flush=True)
+st.session_state["session_id"] = st.session_state["conversation_id"]
+try:
+    conversations = conversation_repo.list_for_user(user_id)
+except Exception as exc:
+    conversations = [{"conversation_id": st.session_state["conversation_id"], "title": "当前会话"}]
+    print(f"[WARN] conversation list failed: {exc}", flush=True)
+conversation_ids = [item["conversation_id"] for item in conversations]
+if st.session_state["conversation_id"] not in conversation_ids:
+    conversation_ids.insert(0, st.session_state["conversation_id"])
+with st.sidebar:
+    st.subheader("💬 会话")
+    selected_conversation = st.selectbox(
+        "选择会话",
+        conversation_ids,
+        index=conversation_ids.index(st.session_state["conversation_id"]),
+        key="conversation_selector",
+    )
+    if selected_conversation != st.session_state["conversation_id"]:
+        st.session_state["conversation_id"] = selected_conversation
+        st.session_state["session_id"] = selected_conversation
+        for key in ("message", "rag", "weekly_plan"):
+            st.session_state.pop(key, None)
+        st.rerun()
+    if st.button("➕ 新建会话", use_container_width=True):
+        new_conversation = conversation_repo.new_id()
+        try:
+            conversation_repo.ensure(user_id, new_conversation)
+        except Exception as exc:
+            print(f"[WARN] new conversation registry write failed: {exc}", flush=True)
+        st.session_state["conversation_id"] = new_conversation
+        st.session_state["session_id"] = new_conversation
+        for key in ("message", "rag", "weekly_plan"):
+            st.session_state.pop(key, None)
+        st.rerun()
+
 # 穿搭档案（所有页面可见）
 with st.sidebar:
     st.header("👤 我的穿搭档案")
@@ -223,7 +268,7 @@ with st.sidebar:
 
     if st.sidebar.button("🔄 重置系统与服务", use_container_width=True):
         # 只清空应用状态，保留登录态
-        for key in ("message", "session_id", "wardrobe_draft", "weekly_plan",
+        for key in ("message", "session_id", "conversation_id", "wardrobe_draft", "weekly_plan",
                     "vector_wardrobe", "rag", "editing_item_id"):
             st.session_state.pop(key, None)
         st.success("服务已重置，正在重新加载...")
@@ -231,9 +276,20 @@ with st.sidebar:
 
     if st.sidebar.button("🗑️ 清空对话历史", use_container_width=True):
         from history import FileChatMessageHistory
+        from native_memory import delete_native_thread, native_memory_requested
 
-        sid = st.session_state.get("session_id", f"chat_session_{user_id}")
-        FileChatMessageHistory(session_id=sid).clear()
+        sid = st.session_state.get(
+            "conversation_id", ConversationRepository.legacy_id(user_id)
+        )
+        legacy_sid = ConversationRepository.legacy_session_id(sid)
+        FileChatMessageHistory(session_id=legacy_sid).clear()
+        if native_memory_requested():
+            rag_service = st.session_state.get("rag")
+            native_runtime = getattr(rag_service, "native_memory", None)
+            if native_runtime is not None:
+                native_runtime.delete_thread(sid)
+            else:
+                delete_native_thread(sid)
         st.session_state["message"] = [{"role": "assistant", "content": "你好，有什么可以帮助你？"}]
         st.toast("对话历史已清空", icon="🗑️")
         time.sleep(0.3)
@@ -248,12 +304,27 @@ if st.sidebar.button("🚪 退出登录", use_container_width=True):
 # ===== 从 Supabase 恢复聊天记录（如存在）=====
 if "message" not in st.session_state:
     from history import FileChatMessageHistory
+    from native_memory import load_native_thread_messages, native_memory_requested
 
-    session_id = f"chat_session_{user_id}"
+    conversation_id = st.session_state.get(
+        "conversation_id", ConversationRepository.legacy_id(user_id)
+    )
+    st.session_state["conversation_id"] = conversation_id
+    st.session_state["session_id"] = conversation_id
     history_start = time.time()
     try:
-        history = FileChatMessageHistory(session_id=session_id)
-        past_messages = history.messages
+        native_messages = (
+            load_native_thread_messages(conversation_id)
+            if native_memory_requested()
+            else None
+        )
+        if native_messages is None:
+            history = FileChatMessageHistory(
+                session_id=ConversationRepository.legacy_session_id(conversation_id)
+            )
+            past_messages = history.messages
+        else:
+            past_messages = native_messages
         if past_messages:
             ui_messages = []
             for msg in past_messages:
