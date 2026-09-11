@@ -21,6 +21,7 @@ from langchain_community.tools import DuckDuckGoSearchRun
 
 from native_memory import NativeMemoryRuntime, native_memory_requested
 from conversation_service import ConversationRepository
+from memory_store import SupabaseMemoryStore
 
 
 class OOTDItem(BaseModel):
@@ -125,6 +126,16 @@ class RagService(object):
         self.conversation_repo = ConversationRepository(schema=config.MEMORY_PRIVATE_SCHEMA)
         self.native_memory = None
         self.checkpointer = None
+        self.memory_store = None
+        if config.LONG_TERM_MEMORY_ENABLED:
+            try:
+                self.memory_store = SupabaseMemoryStore(schema=config.MEMORY_PRIVATE_SCHEMA)
+                # Probe the private table once during startup so a missing
+                # migration fails before an answer is served.
+                self.memory_store.list_for_user(user_id, limit=1)
+                print("[MEMORY] long-term BaseStore enabled", flush=True)
+            except Exception as exc:
+                print(f"[WARN] long-term memory unavailable; feature disabled: {exc}", flush=True)
         if native_memory_requested():
             try:
                 self.native_memory = NativeMemoryRuntime.connect(user_id=user_id)
@@ -164,6 +175,18 @@ class RagService(object):
                 top_texts = self.vector_wardrobe.search(query, k=15)
                 if top_texts:
                     inputs["wardrobe"] = "\n".join(top_texts)
+        if getattr(self, "memory_store", None) is not None and self.user_id:
+            try:
+                memories = self.memory_store.recall(self.user_id, inputs.get("input", ""), limit=5)
+                memory_lines = [
+                    f"- {item.key}: {json.dumps(item.value, ensure_ascii=False)}"
+                    for item in memories
+                ]
+                inputs["long_term_memory"] = "\n".join(memory_lines)[:1200]
+            except Exception as exc:
+                # Memory recall is helpful context, not a reason to reject a
+                # user question during a partial rollout.
+                print(f"[WARN] long-term memory recall skipped: {exc}", flush=True)
         print(f"[PERF] RagService._prepare_inputs took {time.time() - start_time:.3f}s", flush=True)
         return inputs
 
@@ -486,6 +509,16 @@ class RagService(object):
     ) -> dict:
         system_prompt = self._build_system_prompt(inputs)
         messages = [SystemMessage(content=system_prompt)] if include_system else []
+        if include_system and inputs.get("long_term_memory"):
+            messages.append(
+                SystemMessage(
+                    content=(
+                        "以下是用户跨会话明确保存的长期记忆，仅在与当前问题相关时使用；"
+                        "如与用户当前明确说明冲突，以当前说明为准：\n"
+                        f"{inputs['long_term_memory']}"
+                    )
+                )
+            )
         if getattr(self, "checkpointer", None) is None or history_messages:
             messages.append(SystemMessage(content="以下是你们的历史对话记录："))
             messages.extend(history_messages)
@@ -708,6 +741,7 @@ class RagService(object):
                 if checkpointer is _CHECKPOINTER_UNSET
                 else checkpointer
             ),
+            store=getattr(self, "memory_store", None),
         )
         print(f"[PERF] RagService.__get_chain took {time.time() - start_time:.3f}s", flush=True)
         return chain

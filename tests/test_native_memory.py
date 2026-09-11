@@ -136,6 +136,26 @@ def test_native_graph_input_does_not_replay_legacy_transcript():
     assert [m.content for m in resumed["messages"]] == ["再次提问"]
 
 
+def test_long_term_memory_is_injected_only_with_a_fresh_system_prompt():
+    service = RagService.__new__(RagService)
+    service.checkpointer = object()
+    service._build_system_prompt = lambda inputs: "动态系统提示"
+
+    first = service._build_graph_inputs(
+        {"input": "新问题", "long_term_memory": "- 偏好: 不穿高跟鞋"},
+        [],
+        include_system=True,
+    )
+    resumed = service._build_graph_inputs(
+        {"input": "再次提问", "long_term_memory": "- 偏好: 不穿高跟鞋"},
+        [],
+        include_system=False,
+    )
+
+    assert "长期记忆" in first["messages"][1].content
+    assert [message.content for message in resumed["messages"]] == ["再次提问"]
+
+
 def test_native_checkpoint_lookup_is_fail_safe():
     class BrokenSaver:
         def get_tuple(self, config):

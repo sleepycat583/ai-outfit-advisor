@@ -166,6 +166,7 @@ MEMORY_NATIVE_FALLBACK=true
 MEMORY_DUAL_WRITE=true
 MEMORY_PRIVATE_SCHEMA=app_private
 SUPABASE_DB_URL=postgresql://...   # 仅服务端 Secret，不进入前端或仓库
+LONG_TERM_MEMORY_ENABLED=true      # 阶段四 BaseStore；需先执行长期记忆迁移
 ```
 
 `conversation_id` 是多会话主键，并直接作为 LangGraph `thread_id`。原生 checkpoint

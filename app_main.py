@@ -256,6 +256,19 @@ with st.sidebar:
     }
     if st.session_state.get("_last_saved_profile") != current_profile:
         user_service.save_profile(user_id, current_profile)
+        if config.LONG_TERM_MEMORY_ENABLED:
+            try:
+                from memory_store import SupabaseMemoryStore
+
+                SupabaseMemoryStore(schema=config.MEMORY_PRIVATE_SCHEMA).remember(
+                    user_id,
+                    "profile",
+                    current_profile,
+                    category="profile",
+                )
+            except Exception as exc:
+                # 档案主数据仍保留在 users.profile；长期记忆不可用时不阻断 UI。
+                print(f"[WARN] structured profile memory write skipped: {exc}", flush=True)
         clear_profile_cache()
         st.session_state["_last_saved_profile"] = current_profile.copy()
 
@@ -265,6 +278,41 @@ with st.sidebar:
             st.text(f"Session ID: {st.session_state['session_id']}")
 
     st.markdown('<div class="cozy-divider"></div>', unsafe_allow_html=True)
+
+    if config.LONG_TERM_MEMORY_ENABLED:
+        with st.expander("🧠 长期记忆管理", expanded=False):
+            try:
+                from memory_store import SupabaseMemoryStore
+
+                memory_store = SupabaseMemoryStore(schema=config.MEMORY_PRIVATE_SCHEMA)
+                memories = memory_store.list_for_user(user_id)
+                if memories:
+                    for memory in memories:
+                        st.caption(f"{memory.key} · 更新于 {memory.updated_at:%Y-%m-%d %H:%M}")
+                        st.json(memory.value, expanded=False)
+                        if st.button("忘记此记忆", key=f"forget_memory_{memory.key}"):
+                            memory_store.forget(user_id, memory.key)
+                            st.rerun()
+                else:
+                    st.caption("尚无手动长期记忆。")
+
+                with st.form("remember_memory_form", clear_on_submit=True):
+                    memory_key = st.text_input("记忆名称", placeholder="例如：不穿高跟鞋")
+                    memory_content = st.text_area("要记住的内容", placeholder="例如：通勤时不穿高跟鞋")
+                    remember = st.form_submit_button("记住")
+                if remember:
+                    if not memory_key.strip() or not memory_content.strip():
+                        st.warning("请填写记忆名称和内容。")
+                    else:
+                        memory_store.remember(
+                            user_id,
+                            memory_key.strip(),
+                            {"content": memory_content.strip(), "source": "user_explicit"},
+                        )
+                        st.rerun()
+            except Exception as exc:
+                st.warning("长期记忆暂不可用，未影响当前会话。")
+                print(f"[WARN] long-term memory management unavailable: {exc}", flush=True)
 
     if st.sidebar.button("🔄 重置系统与服务", use_container_width=True):
         # 只清空应用状态，保留登录态

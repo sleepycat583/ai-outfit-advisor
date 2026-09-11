@@ -19,6 +19,11 @@
 `supabase/migrations/20260911100000_native_memory_private_schema.sql` 为幂等，
 会建立会话注册表和官方 saver 表结构；未配置真实 Supabase DB 时不会执行线上迁移。
 
+阶段四提供 `SupabaseMemoryStore(BaseStore)` 与显式 `remember/forget` 接口。
+启用 `LONG_TERM_MEMORY_ENABLED=true` 前需执行
+`supabase/migrations/20260911120000_long_term_memory_private.sql`。当前阶段使用
+结构化 JSONB 与受用户 namespace 约束的检索；embedding/pgvector 仍在阶段六。
+
 ---
 
 ## 1. 为什么要做这次迁移
