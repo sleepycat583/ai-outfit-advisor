@@ -191,6 +191,41 @@ def test_agent_history_bounds_when_persistence_read_fails(monkeypatch):
     assert messages[-1].content == "消息-29"
 
 
+def test_add_messages_uses_legacy_payload_when_new_columns_are_unavailable(monkeypatch):
+    chat_history, supabase = make_history(monkeypatch)
+    existing = [HumanMessage(content="旧消息")]
+    supabase.rows["session-1"] = {
+        "messages": chat_history._serialize_messages(existing),
+    }
+
+    chat_history._fetch_row = lambda: (_ for _ in ()).throw(RuntimeError("missing columns"))
+    chat_history.add_messages([AIMessage(content="新消息")])
+
+    row = supabase.rows["session-1"]
+    assert [m.content for m in chat_history._load_json_messages(row["messages"])] == ["旧消息", "新消息"]
+    assert "recent_messages" not in row
+    assert "summary" not in row
+
+
+def test_summary_keeps_bounded_tail_when_recent_window_is_corrupt(monkeypatch):
+    chat_history, supabase = make_history(monkeypatch)
+    full_messages = []
+    for message_number in range(15):
+        full_messages.append(HumanMessage(content=f"消息-{message_number}"))
+    supabase.rows["session-1"] = {
+        "messages": chat_history._serialize_messages(full_messages),
+        "recent_messages": "not-json",
+        "summary": "用户偏好极简风",
+        "summary_message_count": 10,
+    }
+
+    messages = chat_history.get_agent_messages()
+
+    assert isinstance(messages[0], SystemMessage)
+    assert len(messages[1:]) == 15
+    assert messages[-1].content == "消息-14"
+
+
 def test_rag_history_ignores_caller_supplied_messages(monkeypatch):
     class PersistedHistory:
         def __init__(self, session_id):

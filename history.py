@@ -51,6 +51,18 @@ class FileChatMessageHistory(BaseChatMessageHistory):
             return result.data[0]
         return None
 
+    def _fetch_legacy_row(self) -> dict | None:
+        """Read only the original transcript columns during schema rollout."""
+        result = (
+            self.supabase.table("chat_messages")
+            .select("messages")
+            .eq("session_id", self.session_id)
+            .execute()
+        )
+        if result.data:
+            return result.data[0]
+        return None
+
     def _load_json_messages(self, raw_value: str | None) -> list[BaseMessage]:
         """把 JSON 字符串安全转换为 LangChain message 列表。"""
         if not raw_value:
@@ -122,6 +134,10 @@ class FileChatMessageHistory(BaseChatMessageHistory):
 
         summary = (row.get("summary") or "").strip()
         recent_messages = self._bounded_tail(self._load_json_messages(row.get("recent_messages")))
+        if not recent_messages:
+            # A damaged/partially written recent window must not hide the
+            # latest transcript when a summary is present.
+            recent_messages = self._bounded_tail(self._load_json_messages(row.get("messages")))
         if recent_messages or summary:
             return self._build_agent_messages(summary, recent_messages)
         return self._bounded_tail(self._load_json_messages(row.get("messages")))
@@ -139,10 +155,16 @@ class FileChatMessageHistory(BaseChatMessageHistory):
         """
         start_time = time.time()
         row = None
+        supports_bounded_columns = True
         try:
             row = self._fetch_row()
         except Exception as exc:
+            supports_bounded_columns = False
             print(f"[WARN] 新记忆字段读取失败，已降级为旧版聊天历史写入：{exc}", flush=True)
+            try:
+                row = self._fetch_legacy_row()
+            except Exception as legacy_exc:
+                print(f"[WARN] 旧版聊天历史读取也失败，将从空历史开始：{legacy_exc}", flush=True)
 
         existing_messages = self._load_json_messages(row.get("messages")) if row else []
         summary = (row.get("summary") or "").strip() if row else ""
@@ -153,11 +175,16 @@ class FileChatMessageHistory(BaseChatMessageHistory):
 
         payload = {
             "messages": self._serialize_messages(full_messages),
-            "recent_messages": self._serialize_messages(recent_messages),
-            "summary": summary,
-            "summary_message_count": summary_message_count,
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
+        if supports_bounded_columns:
+            payload.update(
+                {
+                    "recent_messages": self._serialize_messages(recent_messages),
+                    "summary": summary,
+                    "summary_message_count": summary_message_count,
+                }
+            )
 
         if row:
             self.supabase.table("chat_messages").update(payload).eq(
