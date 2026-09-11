@@ -168,6 +168,29 @@ def test_agent_history_bounds_oversized_recent_column(monkeypatch):
     assert messages[-1].content == "消息-29"
 
 
+def test_agent_history_bounds_when_persistence_read_fails(monkeypatch):
+    chat_history, _ = make_history(monkeypatch)
+    full_messages = []
+    for message_number in range(30):
+        full_messages.append(HumanMessage(content=f"消息-{message_number}"))
+
+    def fail_fetch():
+        raise RuntimeError("temporary database failure")
+
+    chat_history._fetch_row = fail_fetch
+    monkeypatch.setattr(
+        history_module.FileChatMessageHistory,
+        "messages",
+        property(lambda _self: full_messages),
+    )
+
+    messages = chat_history.get_agent_messages()
+
+    assert len(messages) == 20
+    assert messages[0].content == "消息-10"
+    assert messages[-1].content == "消息-29"
+
+
 def test_rag_history_ignores_caller_supplied_messages(monkeypatch):
     class PersistedHistory:
         def __init__(self, session_id):

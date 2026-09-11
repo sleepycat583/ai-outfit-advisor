@@ -114,7 +114,9 @@ class FileChatMessageHistory(BaseChatMessageHistory):
         try:
             row = self._fetch_row()
         except Exception:
-            return self.messages
+            # 查询新字段失败时仍必须限制 Agent 上下文；``messages`` 保留
+            # 完整 transcript 供 UI 恢复，因此不能直接将其作为模型输入。
+            return self._bounded_tail(self.messages)
         if not row:
             return []
 
