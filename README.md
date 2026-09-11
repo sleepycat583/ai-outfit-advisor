@@ -110,7 +110,6 @@ CREATE TABLE users (
     created_at TEXT,
     profile TEXT DEFAULT '{}'
 );
-```
 -- 2. 聊天记录表
 CREATE TABLE chat_messages (
     session_id TEXT PRIMARY KEY,
@@ -120,7 +119,7 @@ CREATE TABLE chat_messages (
     summary_message_count INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT
 );
-```
+
 -- 3. 衣橱单品表
 CREATE TABLE wardrobe_items (
     id TEXT PRIMARY KEY,
@@ -133,7 +132,6 @@ CREATE TABLE wardrobe_items (
     image_path TEXT DEFAULT '',
     created_at TEXT
 );
-```
 -- 4. 知识库记录表 (用于防重和恢复)
 CREATE TABLE kb_documents (
     id SERIAL PRIMARY KEY,
@@ -147,6 +145,12 @@ CREATE TABLE kb_documents (
     operator_name TEXT,
     source_type TEXT DEFAULT 'user'
 );
+```
+
+`messages` 用于界面恢复完整 transcript；Agent 只读取 `summary` 与最多最近 20 条
+`recent_messages`。执行 `20260910154247_bound_legacy_chat_context.sql` 可修复旧版本
+首次回填产生的超长 `recent_messages`，不会删除完整 transcript。若历史 JSON 损坏，迁移
+会将 Agent 窗口降级为空数组，避免阻断整批迁移。
 
 
 知识库上传者归属迁移：如果项目已部署过旧版本，请先在 Supabase SQL Editor 中执行

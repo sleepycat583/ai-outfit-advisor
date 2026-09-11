@@ -78,6 +78,19 @@ class FileChatMessageHistory(BaseChatMessageHistory):
         agent_messages.extend(recent_messages)
         return agent_messages
 
+    def _bounded_tail(self, messages: list[BaseMessage]) -> list[BaseMessage]:
+        """Return at most the configured number of recent messages.
+
+        This is a safety net for rows created before the bounded-memory columns
+        existed, rows with malformed JSON, and partially applied migrations.
+        The complete transcript remains available through ``messages`` for UI
+        recovery and explicit export.
+        """
+        max_recent_messages = max(0, int(config.chat_history_max_rounds) * 2)
+        if max_recent_messages == 0:
+            return []
+        return messages[-max_recent_messages:]
+
     @property
     def messages(self) -> list[BaseMessage]:
         start_time = time.time()
@@ -106,10 +119,10 @@ class FileChatMessageHistory(BaseChatMessageHistory):
             return []
 
         summary = (row.get("summary") or "").strip()
-        recent_messages = self._load_json_messages(row.get("recent_messages"))
+        recent_messages = self._bounded_tail(self._load_json_messages(row.get("recent_messages")))
         if recent_messages or summary:
             return self._build_agent_messages(summary, recent_messages)
-        return self._load_json_messages(row.get("messages"))
+        return self._bounded_tail(self._load_json_messages(row.get("messages")))
 
     def add_messages(
         self,
@@ -134,8 +147,7 @@ class FileChatMessageHistory(BaseChatMessageHistory):
         summary_message_count = int(row.get("summary_message_count") or 0) if row else 0
 
         full_messages = [*existing_messages, *list(messages)]
-        max_recent_messages = int(config.chat_history_max_rounds) * 2
-        recent_messages = full_messages[-max_recent_messages:] if max_recent_messages > 0 else full_messages
+        recent_messages = self._bounded_tail(full_messages)
 
         payload = {
             "messages": self._serialize_messages(full_messages),
@@ -177,10 +189,9 @@ class FileChatMessageHistory(BaseChatMessageHistory):
         full_messages = self._load_json_messages(row.get("messages"))
         summary = (row.get("summary") or "").strip()
         summary_message_count = int(row.get("summary_message_count") or 0)
-        max_recent_messages = int(config.chat_history_max_rounds) * 2
-        recent_messages = self._load_json_messages(row.get("recent_messages"))
+        recent_messages = self._bounded_tail(self._load_json_messages(row.get("recent_messages")))
         if not recent_messages:
-            recent_messages = full_messages[-max_recent_messages:] if max_recent_messages > 0 else full_messages
+            recent_messages = self._bounded_tail(full_messages)
 
         overflow_end = max(0, len(full_messages) - len(recent_messages))
         remaining_overflow = full_messages[summary_message_count:overflow_end]

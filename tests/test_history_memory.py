@@ -125,6 +125,49 @@ def test_malformed_full_history_falls_back_to_empty_list(monkeypatch):
     assert chat_history.messages == []
 
 
+def test_agent_history_bounds_legacy_rows_without_recent_columns(monkeypatch):
+    chat_history, supabase = make_history(monkeypatch)
+    full_messages = []
+    for round_number in range(15):
+        full_messages.extend(
+            [
+                HumanMessage(content=f"问题-{round_number}"),
+                AIMessage(content=f"回答-{round_number}"),
+            ]
+        )
+    supabase.rows["session-1"] = {
+        "messages": chat_history._serialize_messages(full_messages),
+        "recent_messages": "",
+        "summary": "",
+        "summary_message_count": 0,
+    }
+
+    messages = chat_history.get_agent_messages()
+
+    assert len(messages) == 20
+    assert messages[0].content == "问题-5"
+    assert messages[-1].content == "回答-14"
+
+
+def test_agent_history_bounds_oversized_recent_column(monkeypatch):
+    chat_history, supabase = make_history(monkeypatch)
+    recent_messages = []
+    for message_number in range(30):
+        recent_messages.append(HumanMessage(content=f"消息-{message_number}"))
+    supabase.rows["session-1"] = {
+        "messages": chat_history._serialize_messages(recent_messages),
+        "recent_messages": chat_history._serialize_messages(recent_messages),
+        "summary": "",
+        "summary_message_count": 0,
+    }
+
+    messages = chat_history.get_agent_messages()
+
+    assert len(messages) == 20
+    assert messages[0].content == "消息-10"
+    assert messages[-1].content == "消息-29"
+
+
 def test_rag_history_ignores_caller_supplied_messages(monkeypatch):
     class PersistedHistory:
         def __init__(self, session_id):
