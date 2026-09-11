@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_core.tools import Tool
+from langchain_core.tools import Tool, create_retriever_tool
 from history import FileChatMessageHistory
 from vector_store_service import VectorStoreService, VectorWardrobeService
 from prompts import RAG_SYSTEM_PROMPT, WEEKLY_PLAN_PROMPT
@@ -17,7 +17,6 @@ from langchain_community.embeddings import DashScopeEmbeddings
 import config_data as config
 from langchain_community.chat_models.tongyi import ChatTongyi
 from langchain_community.tools import DuckDuckGoSearchRun
-from langchain.tools.retriever import create_retriever_tool
 
 
 class OOTDItem(BaseModel):
@@ -215,9 +214,9 @@ class RagService(object):
 
     def _get_langgraph_factory(self):
         try:
-            from langgraph.prebuilt import create_react_agent
+            from langchain.agents import create_agent
 
-            return create_react_agent
+            return create_agent
         except Exception as exc:
             raise RuntimeError(LANGGRAPH_IMPORT_ERROR_MESSAGE) from exc
 
@@ -548,7 +547,7 @@ class RagService(object):
         """获取 LangGraph ReAct Agent，并打印组装工具链耗时。"""
         start_time = time.time()
         retriever = self.vector_service.get_retriever()
-        create_react_agent = self._get_langgraph_factory()
+        create_agent_factory = self._get_langgraph_factory()
 
         # 1. 创建工具
         search_tool = Tool(
@@ -567,7 +566,7 @@ class RagService(object):
             "当用户询问关于服装洗涤、尺码推荐、颜色搭配等通用穿搭知识时，必须使用此工具。",
         )
         tools = [search_tool, retriever_tool]
-        chain = create_react_agent(self.chat_model, tools)
+        chain = create_agent_factory(model=self.chat_model, tools=tools)
         print(f"[PERF] RagService.__get_chain took {time.time() - start_time:.3f}s", flush=True)
         return chain
 

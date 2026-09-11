@@ -4,11 +4,17 @@
 >
 > 目标：沉淀一份既能指导后续技术迁移、又适合在面试/答辩中讲述“架构演进”的说明文档。
 
+> 当前实现状态（`feat/native-langgraph-memory`）：普通问答已迁移到
+> LangChain v1 `create_agent`（底层 LangGraph），`RagService.invoke()`、`stream()`
+> 和 `stream_events()` 的外部协议保持不变。原生 `PostgresSaver`、`BaseStore`、
+> Queue/Cron 和 pgvector 仍按后续阶段推进，当前生产默认仍由 feature flag 使用 legacy
+> Supabase 聊天历史。
+
 ---
 
 ## 1. 为什么要做这次迁移
 
-当前项目已经具备一个较完整的 AI 应用闭环：
+迁移前项目已经具备一个较完整的 AI 应用闭环：
 
 - 多用户登录与用户画像管理
 - 基于天气与知识库的穿搭问答
@@ -17,7 +23,7 @@
 - 7 天穿搭计划生成
 - 聊天历史持久化
 
-随着能力逐渐变复杂，原先基于 **LangChain AgentExecutor** 的实现开始暴露出一些问题：
+随着能力逐渐变复杂，迁移前基于 **LangChain AgentExecutor** 的实现开始暴露出一些问题：
 
 1. **执行流程不够显式**
    - 当前 Agent 的控制流封装在 `create_tool_calling_agent + AgentExecutor` 内部。
@@ -54,7 +60,7 @@
 - 普通穿搭问答入口
 - 周计划生成入口
 
-当前使用的关键组件：
+迁移前使用的关键组件：
 
 ```python
 RunnableWithMessageHistory
@@ -118,7 +124,7 @@ RunnableWithMessageHistory(...)
 
 ### 2.2 当前执行链路
 
-普通问答的链路可以概括为：
+迁移前普通问答的链路可以概括为：
 
 ```text
 app_qa.py
@@ -136,6 +142,22 @@ RunnableWithMessageHistory(...)
 RunnableLambda(extract_output)
   ↓
 返回字符串给 Streamlit UI
+```
+
+当前普通问答链路为：
+
+```text
+app_qa.py
+  ↓
+RagService.stream_events() / invoke()
+  ↓
+_prepare_inputs() + Supabase legacy history (summary + recent window)
+  ↓
+create_agent(model, tools)
+  ↓
+LangGraph compiled state graph (messages state)
+  ↓
+返回兼容字符串或状态事件
 ```
 
 工具层包含两种能力：
@@ -338,6 +360,11 @@ LangGraph 都比传统 AgentExecutor 更自然。
    - Message：`feat: stream LangGraph agent events to chat UI`
    - 目的：把 `app_qa.py` 中原本依赖 `BaseCallbackHandler` 的 UI 状态展示，迁移为由 `RagService.stream_events()` 消费 LangGraph 执行事件。
 
+3. **LangChain v1 Agent API 迁移（当前提交）**
+   - `RagService` 使用 `langchain.agents.create_agent`，并从 `langchain_core.tools` 导入 `create_retriever_tool`。
+   - `RagService.invoke()` 仍返回字符串，`stream_events()` 仍输出 UI 约定的 `status`、`answer` 和 `error` 事件。
+   - 目标依赖环境实测：`12 passed`，`pip check` 无冲突；尚未执行真实 DashScope 网络调用。
+
 这两个提交被故意拆开，而不是混在一起，原因是：
 
 - `get_all_items()` fallback 是独立的稳定性修复；
@@ -354,18 +381,23 @@ LangGraph 都比传统 AgentExecutor 更自然。
 
 这是迁移核心。
 
-需要替换的内容包括：
+迁移前需要替换的内容包括（当前代码已完成普通问答部分）：
 
 - `create_tool_calling_agent`
 - `AgentExecutor`
 - `RunnableWithMessageHistory`
 - `RunnableLambda(extract_output)`
 
-需要新增的内容包括：
+已新增/正在演进的内容包括：
 
 - LangGraph state 定义
 - graph 构建与编译
 - graph 输出到字符串的兼容封装
+- LangChain v1 `create_agent` 与 `langchain_core.tools.create_retriever_tool`
+
+当前实现仍保留手工读取/写入 `history.py`，尚未把 `PostgresSaver` 或 `Store` 注入
+Agent；这属于后续多会话与长期记忆阶段，不能将本次 `create_agent` 迁移误认为原生
+checkpoint 已完成。
 
 #### `requirements.txt`
 

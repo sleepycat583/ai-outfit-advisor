@@ -94,6 +94,10 @@ git clone [https://github.com/sleepycat583/ai-outfit-advisor.git](https://github
 cd ai-outfit-advisor
 pip install -r requirements.txt
 
+当前 Agent 使用 LangChain v1 的 `create_agent`（底层由 LangGraph 驱动），依赖版本已在
+`requirements.txt` 中锁定为同一兼容矩阵。升级前请在隔离虚拟环境执行完整测试；生产环境
+仍需按阶段 feature flag 控制切换。
+
 
 第二步、配置 Supabase 云端数据库（免费）
 
