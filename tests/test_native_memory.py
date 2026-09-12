@@ -468,6 +468,41 @@ def test_native_success_without_dual_write_does_not_touch_legacy_history(monkeyp
     assert answer == "原生回答"
 
 
+def test_successful_turn_enqueues_async_memory_extraction(monkeypatch):
+    jobs = []
+
+    class Job:
+        pass
+
+    class Repository:
+        def enqueue(self, job):
+            jobs.append(job)
+            return True
+
+    service = RagService.__new__(RagService)
+    service.user_id = "user-a"
+    service.memory_job_repository = Repository()
+    monkeypatch.setattr(config, "MEMORY_ASYNC_EXTRACTION_ENABLED", True)
+    monkeypatch.setattr(config, "LONG_TERM_MEMORY_ENABLED", True)
+    monkeypatch.setattr(rag_module, "make_turn_job", lambda **kwargs: Job(), raising=False)
+    monkeypatch.setattr(rag_module, "MemoryJobRepository", lambda **kwargs: service.memory_job_repository, raising=False)
+
+    service._enqueue_memory_extraction("conversation-a", "用户问题", "助手回答")
+
+    assert len(jobs) == 1
+
+
+def test_async_memory_requires_long_term_flag(monkeypatch):
+    jobs = []
+    service = RagService.__new__(RagService)
+    service.user_id = "user-a"
+    service.memory_job_repository = type("Repository", (), {"enqueue": lambda self, job: jobs.append(job)})()
+    monkeypatch.setattr(config, "MEMORY_ASYNC_EXTRACTION_ENABLED", True)
+    monkeypatch.setattr(config, "LONG_TERM_MEMORY_ENABLED", False)
+    service._enqueue_memory_extraction("conversation-a", "问题", "回答")
+    assert jobs == []
+
+
 def test_native_migration_matches_postgres_saver_current_schema():
     migration = (
         __import__("pathlib").Path(__file__).parents[1]

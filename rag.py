@@ -2,8 +2,10 @@ from typing import Optional
 
 import datetime
 import copy
+import hashlib
 import json
 import time
+import uuid
 
 from pydantic import BaseModel, Field
 
@@ -30,6 +32,7 @@ from langchain_community.tools import DuckDuckGoSearchRun
 from native_memory import NativeMemoryRuntime, native_memory_requested
 from conversation_service import ConversationRepository
 from memory_store import SupabaseMemoryStore
+from memory_jobs import MemoryJobRepository, make_turn_job
 
 
 class OOTDItem(BaseModel):
@@ -271,6 +274,10 @@ class RagService(object):
             except Exception as exc:
                 print(f"[WARN] 聊天历史写入不可用，已跳过持久化：{exc}", flush=True)
 
+            self._enqueue_memory_extraction(
+                session_id, prepared_inputs.get("input", ""), answer
+            )
+
             print(f"[PERF] RagService.stream_events total took {time.time() - total_start:.3f}s", flush=True)
             yield {"type": "answer", "content": answer}
         except Exception as exc:
@@ -375,6 +382,34 @@ class RagService(object):
         except Exception as exc:
             print(f"[WARN] native degraded marker lookup failed: {exc}", flush=True)
             return False
+
+    def _enqueue_memory_extraction(self, conversation_id: str, user_text: str, answer: str) -> None:
+        if (
+            not app_config.MEMORY_ASYNC_EXTRACTION_ENABLED
+            or not app_config.LONG_TERM_MEMORY_ENABLED
+            or not self.user_id
+        ):
+            return
+        # 每次成功回答都是独立 turn；内容相同也不能丢掉后续记忆提取任务。
+        turn_id = uuid.uuid4().hex
+        try:
+            job = make_turn_job(
+                user_id=self.user_id,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                messages=[HumanMessage(content=user_text), AIMessage(content=answer)],
+            )
+            if job is None:
+                return
+            repository = getattr(self, "memory_job_repository", None)
+            if repository is None:
+                repository = MemoryJobRepository(
+                    schema=app_config.MEMORY_PRIVATE_SCHEMA,
+                    queue_name=app_config.MEMORY_JOB_QUEUE_NAME,
+                )
+            repository.enqueue(job)
+        except Exception as exc:
+            print(f"[WARN] async memory extraction enqueue skipped: {exc}", flush=True)
 
     def _build_system_prompt(self, inputs: dict) -> str:
         prompt_inputs = {
@@ -663,6 +698,7 @@ class RagService(object):
                 history.maybe_update_summary(summary_updater=self.summarize_chat_messages)
         except Exception as exc:
             print(f"[WARN] 聊天历史写入不可用，已跳过持久化：{exc}", flush=True)
+        self._enqueue_memory_extraction(session_id, inputs.get("input", ""), answer)
         return answer
 
     def _invoke_legacy_graph(self, inputs: dict, normalized_config: dict) -> str:
@@ -691,6 +727,7 @@ class RagService(object):
             history.maybe_update_summary(summary_updater=self.summarize_chat_messages)
         except Exception as exc:
             print(f"[WARN] legacy fallback history write failed: {exc}", flush=True)
+        self._enqueue_memory_extraction(session_id, inputs.get("input", ""), answer)
         return answer
 
     def _weather_search(self, query: str) -> str:

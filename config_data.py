@@ -64,6 +64,9 @@ MEMORY_DUAL_WRITE = _env_bool("MEMORY_DUAL_WRITE", default=MEMORY_BACKEND == "na
 MEMORY_NATIVE_FALLBACK = _env_bool("MEMORY_NATIVE_FALLBACK", default=True)
 MEMORY_PRIVATE_SCHEMA = os.getenv("MEMORY_PRIVATE_SCHEMA", "app_private").strip() or "app_private"
 LONG_TERM_MEMORY_ENABLED = _env_bool("LONG_TERM_MEMORY_ENABLED", default=False)
+MEMORY_ASYNC_EXTRACTION_ENABLED = _env_bool("MEMORY_ASYNC_EXTRACTION_ENABLED", default=False)
+MEMORY_JOB_QUEUE_NAME = os.getenv("MEMORY_JOB_QUEUE_NAME", "memory-extraction").strip().lower()
+MEMORY_JOB_MAX_ATTEMPTS = int(os.getenv("MEMORY_JOB_MAX_ATTEMPTS", "5"))
 
 # 摘要约束检测关键词配置
 # 用于识别用户消息中的明确约束,确保这些约束在摘要压缩时不被丢弃
