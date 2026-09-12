@@ -27,7 +27,37 @@ def _validate_schema(schema: str) -> str:
     schema = (schema or "").strip().lower()
     if not _SCHEMA_RE.fullmatch(schema):
         raise ValueError("MEMORY_PRIVATE_SCHEMA 必须是合法的 PostgreSQL 标识符")
+    if schema in {"public", "pg_catalog", "information_schema"} or schema.startswith("pg_toast"):
+        raise ValueError("MEMORY_PRIVATE_SCHEMA 不能使用公开或系统 schema")
     return schema
+
+
+def _assert_private_schema(
+    cursor: object,
+    schema: str,
+    *,
+    required_tables: tuple[str, ...] = (),
+    migration_key: str | None = None,
+) -> None:
+    """在任何 DDL/查询前验证私有 schema 和部署迁移标记。"""
+    schema = _validate_schema(schema)
+    cursor.execute("SELECT to_regnamespace(%s) AS schema_name", (schema,))
+    row = cursor.fetchone()
+    if not row or not row.get("schema_name"):
+        raise RuntimeError(f"私有 schema 不存在: {schema}")
+    for table in required_tables:
+        cursor.execute("SELECT to_regclass(%s) AS table_name", (f"{schema}.{table}",))
+        row = cursor.fetchone()
+        if not row or not row.get("table_name"):
+            raise RuntimeError(f"私有 schema 缺少表: {schema}.{table}")
+    if migration_key:
+        cursor.execute(
+            f'SELECT status FROM "{schema}"."memory_migrations" WHERE migration_key = %s',
+            (migration_key,),
+        )
+        row = cursor.fetchone()
+        if not row or row.get("status") != "completed":
+            raise RuntimeError(f"私有 memory 迁移未完成: {migration_key}")
 
 
 @dataclass
@@ -58,11 +88,23 @@ class NativeMemoryRuntime:
         )
         try:
             with connection.cursor() as cursor:
-                cursor.execute(f'SET search_path TO "{schema}", public')
+                _assert_private_schema(
+                    cursor,
+                    schema,
+                    required_tables=("conversations", "memory_migrations"),
+                    migration_key="native_memory_private_schema",
+                )
+                cursor.execute(f'SET search_path TO "{schema}"')
             checkpointer = PostgresSaver(connection)
-            # setup() is idempotent and applies the upstream saver migrations.
-            # It must run once per database before the graph starts serving traffic.
-            checkpointer.setup()
+            # Serialize upstream migration version inserts across processes.
+            lock_key = f"native-memory-checkpoint-setup:{schema}"
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (lock_key,))
+            try:
+                checkpointer.setup()
+            finally:
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lock_key,))
             return cls(connection=connection, checkpointer=checkpointer, user_id=user_id)
         except Exception:
             connection.close()
@@ -82,10 +124,13 @@ def native_memory_requested() -> bool:
     return config.MEMORY_BACKEND == "native" or config.MEMORY_DUAL_WRITE
 
 
-def delete_native_thread(conversation_id: str) -> bool:
+def delete_native_thread(conversation_id: str, user_id: str) -> bool:
     """在没有已初始化 RagService 时显式删除 checkpoint。"""
     try:
-        runtime = NativeMemoryRuntime.connect()
+        from conversation_service import ConversationRepository
+
+        ConversationRepository(schema=config.MEMORY_PRIVATE_SCHEMA).ensure_existing(user_id, conversation_id)
+        runtime = NativeMemoryRuntime.connect(user_id=user_id)
     except Exception as exc:
         print(f"[WARN] native checkpoint delete skipped: {exc}", flush=True)
         return False
@@ -96,7 +141,7 @@ def delete_native_thread(conversation_id: str) -> bool:
         runtime.close()
 
 
-def load_native_thread_messages(conversation_id: str) -> Optional[list[object]]:
+def load_native_thread_messages(conversation_id: str, user_id: str) -> Optional[list[object]]:
     """读取一个 native thread 的已恢复消息，供 UI 在进程重启后展示。
 
     ``None`` 表示 native 存储不可用，调用方应降级读取 legacy transcript；
@@ -104,7 +149,10 @@ def load_native_thread_messages(conversation_id: str) -> Optional[list[object]]:
     Human/AI 消息，避免把动态系统提示和工具协议渲染到聊天界面。
     """
     try:
-        runtime = NativeMemoryRuntime.connect()
+        from conversation_service import ConversationRepository
+
+        ConversationRepository(schema=config.MEMORY_PRIVATE_SCHEMA).ensure_existing(user_id, conversation_id)
+        runtime = NativeMemoryRuntime.connect(user_id=user_id)
     except Exception as exc:
         print(f"[WARN] native checkpoint history read skipped: {exc}", flush=True)
         return None

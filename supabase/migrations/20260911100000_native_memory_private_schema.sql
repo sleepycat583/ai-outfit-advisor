@@ -1,5 +1,5 @@
 -- Native LangGraph memory objects.
--- The application connects with search_path=app_private,public.  Keeping these
+-- The application connects with search_path=app_private only. Keeping these
 -- objects outside public prevents anon/authenticated Data API access.
 
 BEGIN;
@@ -16,6 +16,11 @@ CREATE TABLE IF NOT EXISTS app_private.conversations (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE app_private.conversations
+    ADD COLUMN IF NOT EXISTS native_state TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE app_private.conversations
+    ADD COLUMN IF NOT EXISTS native_error TEXT;
 
 CREATE INDEX IF NOT EXISTS conversations_user_updated_idx
     ON app_private.conversations (user_id, updated_at DESC);
@@ -89,5 +94,17 @@ CREATE INDEX IF NOT EXISTS checkpoint_blobs_thread_id_idx
     ON app_private.checkpoint_blobs (thread_id);
 CREATE INDEX IF NOT EXISTS checkpoint_writes_thread_id_idx
     ON app_private.checkpoint_writes (thread_id);
+
+INSERT INTO app_private.memory_migrations (migration_key, completed_at, status, details)
+VALUES (
+    'native_memory_private_schema',
+    now(),
+    'completed',
+    jsonb_build_object('schema', 'app_private', 'version', '20260911100000')
+)
+ON CONFLICT (migration_key) DO UPDATE SET
+    completed_at = EXCLUDED.completed_at,
+    status = EXCLUDED.status,
+    details = EXCLUDED.details;
 
 COMMIT;

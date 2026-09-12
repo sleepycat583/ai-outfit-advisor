@@ -44,7 +44,10 @@ def user_namespace(user_id: str, category: str = "memory") -> tuple[str, ...]:
 class SupabaseMemoryStore(BaseStore):
     """基于 psycopg 的同步长期记忆 store。"""
 
-    def __init__(self, *, schema: str = "app_private"):
+    def __init__(self, *, user_id: str, schema: str = "app_private"):
+        if not user_id or ":" in user_id:
+            raise MemoryNamespaceError("user_id 不能为空且不能包含 ':'")
+        self.user_id = user_id
         self.schema = _validate_schema(schema)
 
     def _connection(self):
@@ -56,15 +59,16 @@ class SupabaseMemoryStore(BaseStore):
 
         conn = psycopg.connect(conn_string, autocommit=True, row_factory=dict_row)
         with conn.cursor() as cursor:
-            cursor.execute(f'SET search_path TO "{self.schema}", public')
+            cursor.execute(f'SET search_path TO "{self.schema}"')
         return conn
 
-    @staticmethod
-    def _validate_namespace(namespace: tuple[str, ...]) -> None:
+    def _validate_namespace(self, namespace: tuple[str, ...]) -> None:
         if not namespace or not isinstance(namespace[0], str):
             raise MemoryNamespaceError("长期记忆必须绑定 user namespace")
         if not _USER_NAMESPACE_RE.fullmatch(namespace[0]):
             raise MemoryNamespaceError("namespace 第一段必须是 user:<user_id>")
+        if namespace[0] != f"user:{self.user_id}":
+            raise MemoryNamespaceError("namespace 不属于当前用户")
 
     @staticmethod
     def _to_item(row: dict[str, Any], result_type=Item):
@@ -140,7 +144,8 @@ class SupabaseMemoryStore(BaseStore):
                             if op.filter:
                                 rows = [
                                     row for row in rows
-                                    if all(row["value"].get(k) == v for k, v in op.filter.items())
+                                    if isinstance(row["value"], dict)
+                                    and all(row["value"].get(k) == v for k, v in op.filter.items())
                                 ]
                             if op.query:
                                 query = op.query.casefold()
@@ -155,25 +160,25 @@ class SupabaseMemoryStore(BaseStore):
                                 ]
                             )
                         elif isinstance(op, ListNamespacesOp):
+                            conditions = tuple(op.match_conditions or ())
                             prefix = next(
-                                (
-                                    tuple(condition.path)
-                                    for condition in op.match_conditions or ()
-                                    if condition.match_type == "prefix"
-                                ),
+                                (tuple(condition.path) for condition in conditions if condition.match_type == "prefix"),
                                 (),
                             )
                             cursor.execute(
                                 """SELECT DISTINCT namespace FROM memory_items
                                    WHERE namespace[1:%s] = %s::text[]
-                                   ORDER BY namespace LIMIT %s OFFSET %s""",
-                                (len(prefix), list(prefix), op.limit, op.offset),
+                                   ORDER BY namespace""",
+                                (len(prefix), list(prefix)),
                             )
                             namespaces = [tuple(row["namespace"]) for row in cursor.fetchall()]
+                            if any(condition.match_type == "suffix" for condition in conditions):
+                                suffixes = [tuple(condition.path) for condition in conditions if condition.match_type == "suffix"]
+                                namespaces = [ns for ns in namespaces if any(ns[-len(suffix):] == suffix for suffix in suffixes)]
                             if op.max_depth is not None:
                                 namespaces = [ns[: op.max_depth] for ns in namespaces]
                                 namespaces = list(dict.fromkeys(namespaces))
-                            results.append(namespaces[: op.limit])
+                            results.append(namespaces[op.offset : op.offset + op.limit])
                         else:
                             raise TypeError(f"unsupported store operation: {type(op)!r}")
             return results
@@ -183,17 +188,25 @@ class SupabaseMemoryStore(BaseStore):
     async def abatch(self, ops: Iterable[Any]) -> list[Any]:
         return await asyncio.to_thread(self.batch, ops)
 
+    def _assert_user(self, user_id: str) -> None:
+        if user_id != self.user_id:
+            raise MemoryNamespaceError("user_id 不属于当前 memory store")
+
     def remember(self, user_id: str, key: str, value: dict[str, Any], *, category: str = "memory") -> None:
+        self._assert_user(user_id)
         self.put(user_namespace(user_id, category), key, value)
 
     def forget(self, user_id: str, key: str, *, category: str = "memory") -> None:
+        self._assert_user(user_id)
         self.delete(user_namespace(user_id, category), key)
 
     def list_for_user(self, user_id: str, *, category: str = "memory", limit: int = 100) -> list[Item]:
+        self._assert_user(user_id)
         return self.search(user_namespace(user_id, category), limit=limit)
 
     def recall(self, user_id: str, query: str, *, limit: int = 5) -> list[Item]:
         """跨会话读取当前用户的结构化档案和显式记忆。"""
+        self._assert_user(user_id)
         profile = self.search(user_namespace(user_id, "profile"), limit=1)
         memories = self.search(user_namespace(user_id, "memory"), query=query, limit=limit)
         return (profile + memories)[:limit]

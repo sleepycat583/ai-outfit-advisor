@@ -237,6 +237,9 @@ def test_rag_history_ignores_caller_supplied_messages(monkeypatch):
     monkeypatch.setattr(rag_module, "FileChatMessageHistory", PersistedHistory)
     service = rag_module.RagService.__new__(rag_module.RagService)
     service.user_id = "user-1"
+    service.conversation_repo = type(
+        "Repository", (), {"ensure_existing": lambda self, user_id, conversation_id: conversation_id}
+    )()
 
     session_id, messages = service._get_session_history(
         {

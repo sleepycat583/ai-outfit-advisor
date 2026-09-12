@@ -8,10 +8,14 @@
 from __future__ import annotations
 
 import uuid
+import re
 from contextlib import contextmanager
 from typing import Iterator
 
 from supabase_config import get_database_url
+
+
+_SCHEMA_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 
 
 class ConversationOwnershipError(PermissionError):
@@ -20,7 +24,12 @@ class ConversationOwnershipError(PermissionError):
 
 class ConversationRepository:
     def __init__(self, *, schema: str = "app_private"):
-        if not schema or not schema.replace("_", "").isalnum() or not schema[0].isalpha():
+        schema = (schema or "").strip().lower()
+        if (
+            not _SCHEMA_RE.fullmatch(schema)
+            or schema in {"public", "pg_catalog", "information_schema"}
+            or schema.startswith("pg_toast")
+        ):
             raise ValueError("invalid private schema")
         self.schema = schema
 
@@ -54,7 +63,7 @@ class ConversationRepository:
         conn = psycopg.connect(conn_string, autocommit=True, row_factory=dict_row)
         try:
             with conn.cursor() as cursor:
-                cursor.execute(f'SET search_path TO "{self.schema}", public')
+                cursor.execute(f'SET search_path TO "{self.schema}"')
             yield conn
         finally:
             conn.close()
@@ -86,6 +95,29 @@ class ConversationRepository:
                     raise ConversationOwnershipError("conversation_id 不属于当前用户")
         return conversation_id
 
+    def ensure_existing(self, user_id: str, conversation_id: str) -> str:
+        """验证已存在的会话归属；绝不因读取/删除请求而创建会话。"""
+        if not user_id or not conversation_id:
+            raise ValueError("user_id 和 conversation_id 不能为空")
+        with self._connection() as conn:
+            if conn is None:
+                allowed = {
+                    self.legacy_id(user_id),
+                    self.legacy_session_id(self.legacy_id(user_id)),
+                }
+                if conversation_id not in allowed:
+                    raise ConversationOwnershipError("无数据库时只能访问当前用户的默认会话")
+                return conversation_id
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT user_id FROM conversations WHERE conversation_id = %s",
+                    (conversation_id,),
+                )
+                row = cursor.fetchone()
+                if not row or row["user_id"] != user_id:
+                    raise ConversationOwnershipError("conversation_id 不属于当前用户")
+        return conversation_id
+
     def list_for_user(self, user_id: str) -> list[dict]:
         with self._connection() as conn:
             if conn is None:
@@ -110,3 +142,29 @@ class ConversationRepository:
                     (conversation_id, user_id),
                 )
                 return cursor.rowcount > 0
+
+    def mark_native_degraded(self, user_id: str, conversation_id: str, error: str) -> bool:
+        """记录 native checkpoint 降级状态，避免失败 thread 被重复使用。"""
+        with self._connection() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """UPDATE conversations
+                       SET native_state = 'degraded', native_error = %s, updated_at = now()
+                       WHERE conversation_id = %s AND user_id = %s""",
+                    (str(error)[:2000], conversation_id, user_id),
+                )
+                return cursor.rowcount > 0
+
+    def is_native_degraded(self, user_id: str, conversation_id: str) -> bool:
+        with self._connection() as conn:
+            if conn is None:
+                return False
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT native_state FROM conversations WHERE conversation_id = %s AND user_id = %s",
+                    (conversation_id, user_id),
+                )
+                row = cursor.fetchone()
+                return bool(row and row.get("native_state") == "degraded")

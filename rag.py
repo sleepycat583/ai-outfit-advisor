@@ -8,7 +8,15 @@ import time
 from pydantic import BaseModel, Field
 
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+)
+
+REMOVE_ALL_MESSAGES = "__remove_all__"
 from langchain_core.tools import Tool, create_retriever_tool
 from history import FileChatMessageHistory
 from vector_store_service import VectorStoreService, VectorWardrobeService
@@ -126,10 +134,15 @@ class RagService(object):
         self.conversation_repo = ConversationRepository(schema=config.MEMORY_PRIVATE_SCHEMA)
         self.native_memory = None
         self.checkpointer = None
+        self._native_degraded_threads: set[str] = set()
+        self._native_pending_removals: list[str] = []
+        self._native_pending_reset_messages: list[BaseMessage] = []
         self.memory_store = None
         if config.LONG_TERM_MEMORY_ENABLED:
             try:
-                self.memory_store = SupabaseMemoryStore(schema=config.MEMORY_PRIVATE_SCHEMA)
+                self.memory_store = SupabaseMemoryStore(
+                    user_id=user_id, schema=config.MEMORY_PRIVATE_SCHEMA
+                )
                 # Probe the private table once during startup so a missing
                 # migration fails before an answer is served.
                 self.memory_store.list_for_user(user_id, limit=1)
@@ -215,10 +228,15 @@ class RagService(object):
             prepared_inputs = self._prepare_inputs(inputs)
             normalized_config = self._normalize_config(config)
             session_id, history_messages = self._get_session_history(normalized_config)
+            if getattr(self, "checkpointer", None) is not None and self._is_native_degraded(session_id):
+                answer = self._invoke_legacy_graph(prepared_inputs, normalized_config)
+                yield {"type": "status", "label": "⚠️ 原生记忆处于降级状态，使用兼容链"}
+                yield {"type": "answer", "content": answer}
+                return
             graph_inputs = self._build_graph_inputs(
                 prepared_inputs,
                 history_messages,
-                include_system=not self._native_has_checkpoint(normalized_config),
+                include_system=True if self.checkpointer is not None else not self._native_has_checkpoint(normalized_config),
             )
 
             yield {"type": "status", "label": "🤔 正在理解你的需求，构思搭配方向..."}
@@ -263,6 +281,9 @@ class RagService(object):
                 and normalized_config is not None
             ):
                 try:
+                    self._mark_native_degraded(
+                        normalized_config["configurable"]["session_id"], str(exc)
+                    )
                     answer = self._invoke_legacy_graph(prepared_inputs, normalized_config)
                     yield {"type": "status", "label": "⚠️ 原生记忆暂不可用，已安全回退"}
                     yield {"type": "answer", "content": answer}
@@ -300,8 +321,22 @@ class RagService(object):
                 session_id = ConversationRepository.legacy_id(self.user_id)
             else:
                 session_id = f"chat_session_{self.user_id}" if self.user_id else "default_session"
-        if getattr(self, "checkpointer", None) is not None and self.user_id:
-            self.conversation_repo.ensure(self.user_id, session_id)
+        if self.user_id:
+            repository = getattr(
+                self,
+                "conversation_repo",
+                ConversationRepository(schema=app_config.MEMORY_PRIVATE_SCHEMA),
+            )
+            requested_id = bool(
+                configurable.get("conversation_id")
+                or configurable.get("session_id")
+                or configurable.get("thread_id")
+            )
+            if requested_id:
+                validator = getattr(repository, "ensure_existing", None) or getattr(repository, "ensure")
+            else:
+                validator = getattr(repository, "ensure")
+            validator(self.user_id, session_id)
         # conversation_id is the sole canonical identity.  Never preserve a
         # conflicting caller-supplied thread_id: the repository validates this
         # id before LangGraph receives it.
@@ -314,6 +349,32 @@ class RagService(object):
     def _should_write_legacy(self) -> bool:
         """决定是否继续写旧 transcript，支持 native 灰度回滚。"""
         return getattr(self, "checkpointer", None) is None or config.MEMORY_DUAL_WRITE
+
+    def _mark_native_degraded(self, session_id: str, error: str) -> None:
+        """保留既有 checkpoint，只把失败 thread 隔离到 legacy 路径。"""
+        degraded = getattr(self, "_native_degraded_threads", None)
+        if degraded is None:
+            degraded = set()
+            self._native_degraded_threads = degraded
+        degraded.add(session_id)
+        try:
+            repository = getattr(self, "conversation_repo", None)
+            mark = getattr(repository, "mark_native_degraded", None)
+            if mark is not None and self.user_id:
+                mark(self.user_id, session_id, error)
+        except Exception as exc:
+            print(f"[WARN] native degraded marker write failed: {exc}", flush=True)
+
+    def _is_native_degraded(self, session_id: str) -> bool:
+        if session_id in getattr(self, "_native_degraded_threads", set()):
+            return True
+        try:
+            repository = getattr(self, "conversation_repo", None)
+            check = getattr(repository, "is_native_degraded", None)
+            return bool(check and self.user_id and check(self.user_id, session_id))
+        except Exception as exc:
+            print(f"[WARN] native degraded marker lookup failed: {exc}", flush=True)
+            return False
 
     def _build_system_prompt(self, inputs: dict) -> str:
         prompt_inputs = {
@@ -418,7 +479,7 @@ class RagService(object):
         if getattr(self, "checkpointer", None) is not None:
             # 首次迁移的 thread 尚无 checkpoint 时导入 legacy 窗口一次；
             # 后续完全由 saver 管理，避免每轮重复追加 transcript。
-            if self._native_has_checkpoint(normalized_config):
+            if self._native_has_messages(normalized_config):
                 return session_id, []
         try:
             storage_session_id = (
@@ -448,6 +509,37 @@ class RagService(object):
             return self.checkpointer.get_tuple(normalized_config) is not None
         except Exception as exc:
             print(f"[WARN] native checkpoint lookup failed; treating as new thread: {exc}", flush=True)
+            return False
+
+    def _native_has_messages(self, normalized_config: dict) -> bool:
+        if getattr(self, "checkpointer", None) is None:
+            return False
+        try:
+            checkpoint_tuple = self.checkpointer.get_tuple(normalized_config)
+            if checkpoint_tuple is None:
+                return False
+            values = checkpoint_tuple.checkpoint.get("channel_values", {})
+            messages = values.get("messages", [])
+            legacy_system_messages = [
+                message
+                for message in messages
+                if isinstance(message, SystemMessage)
+                and not getattr(message, "id", None)
+            ]
+            if legacy_system_messages:
+                self._native_pending_reset_messages = [
+                    message for message in messages if not isinstance(message, SystemMessage)
+                ]
+            self._native_pending_removals = [
+                message.id
+                for message in messages
+                if isinstance(message, SystemMessage)
+                and getattr(message, "id", None)
+                and message.id not in {"native-dynamic-system", "native-long-term-memory"}
+            ]
+            return bool(messages)
+        except Exception as exc:
+            print(f"[WARN] native message lookup failed; treating thread as empty: {exc}", flush=True)
             return False
 
     def _extract_answer_from_state(self, state) -> str:
@@ -508,30 +600,43 @@ class RagService(object):
         include_system: bool = True,
     ) -> dict:
         system_prompt = self._build_system_prompt(inputs)
-        messages = [SystemMessage(content=system_prompt)] if include_system else []
-        if include_system and inputs.get("long_term_memory"):
+        pending_removals = [RemoveMessage(id=message_id) for message_id in getattr(self, "_native_pending_removals", [])]
+        self._native_pending_removals = []
+        pending_reset_messages = getattr(self, "_native_pending_reset_messages", [])
+        self._native_pending_reset_messages = []
+        if pending_reset_messages:
+            pending_removals = [RemoveMessage(id=REMOVE_ALL_MESSAGES)]
+        messages = pending_removals
+        if include_system:
+            messages.append(SystemMessage(content=system_prompt, id="native-dynamic-system"))
+        if include_system:
+            long_term_memory = inputs.get("long_term_memory") or "暂无额外的长期记忆。"
             messages.append(
                 SystemMessage(
                     content=(
                         "以下是用户跨会话明确保存的长期记忆，仅在与当前问题相关时使用；"
                         "如与用户当前明确说明冲突，以当前说明为准：\n"
-                        f"{inputs['long_term_memory']}"
-                    )
+                        f"{long_term_memory}"
+                    ),
+                    id="native-long-term-memory",
                 )
             )
         if getattr(self, "checkpointer", None) is None or history_messages:
             messages.append(SystemMessage(content="以下是你们的历史对话记录："))
             messages.extend(history_messages)
+        messages.extend(pending_reset_messages)
         messages.append(HumanMessage(content=inputs.get("input", "")))
         return {"messages": messages}
 
     def _invoke_graph(self, inputs: dict, config: Optional[dict] = None) -> str:
         normalized_config = self._normalize_config(config)
         session_id, history_messages = self._get_session_history(normalized_config)
+        if getattr(self, "checkpointer", None) is not None and self._is_native_degraded(session_id):
+            return self._invoke_legacy_graph(inputs, normalized_config)
         graph_inputs = self._build_graph_inputs(
             inputs,
             history_messages,
-            include_system=not self._native_has_checkpoint(normalized_config),
+            include_system=True if self.checkpointer is not None else not self._native_has_checkpoint(normalized_config),
         )
 
         try:
@@ -539,6 +644,7 @@ class RagService(object):
         except Exception as exc:
             if self.checkpointer is None or not app_config.MEMORY_NATIVE_FALLBACK:
                 raise
+            self._mark_native_degraded(session_id, str(exc))
             print(f"[WARN] native graph failed; using legacy chain: {exc}", flush=True)
             return self._invoke_legacy_graph(inputs, normalized_config)
         answer = self._extract_answer_from_state(state)

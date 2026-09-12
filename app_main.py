@@ -196,7 +196,7 @@ with st.sidebar:
         "选择会话",
         conversation_ids,
         index=conversation_ids.index(st.session_state["conversation_id"]),
-        key="conversation_selector",
+        key=f"conversation_selector_{st.session_state['conversation_id']}",
     )
     if selected_conversation != st.session_state["conversation_id"]:
         st.session_state["conversation_id"] = selected_conversation
@@ -260,7 +260,7 @@ with st.sidebar:
             try:
                 from memory_store import SupabaseMemoryStore
 
-                SupabaseMemoryStore(schema=config.MEMORY_PRIVATE_SCHEMA).remember(
+                SupabaseMemoryStore(user_id=user_id, schema=config.MEMORY_PRIVATE_SCHEMA).remember(
                     user_id,
                     "profile",
                     current_profile,
@@ -284,7 +284,7 @@ with st.sidebar:
             try:
                 from memory_store import SupabaseMemoryStore
 
-                memory_store = SupabaseMemoryStore(schema=config.MEMORY_PRIVATE_SCHEMA)
+                memory_store = SupabaseMemoryStore(user_id=user_id, schema=config.MEMORY_PRIVATE_SCHEMA)
                 memories = memory_store.list_for_user(user_id)
                 if memories:
                     for memory in memories:
@@ -330,16 +330,28 @@ with st.sidebar:
             "conversation_id", ConversationRepository.legacy_id(user_id)
         )
         legacy_sid = ConversationRepository.legacy_session_id(sid)
-        FileChatMessageHistory(session_id=legacy_sid).clear()
+        clear_succeeded = True
+        try:
+            FileChatMessageHistory(session_id=legacy_sid).clear()
+        except Exception as exc:
+            clear_succeeded = False
+            print(f"[WARN] legacy chat history clear failed: {exc}", flush=True)
         if native_memory_requested():
             rag_service = st.session_state.get("rag")
             native_runtime = getattr(rag_service, "native_memory", None)
-            if native_runtime is not None:
-                native_runtime.delete_thread(sid)
-            else:
-                delete_native_thread(sid)
+            try:
+                if native_runtime is not None:
+                    native_runtime.delete_thread(sid)
+                else:
+                    clear_succeeded = delete_native_thread(sid, user_id) and clear_succeeded
+            except Exception as exc:
+                clear_succeeded = False
+                print(f"[WARN] native checkpoint clear failed: {exc}", flush=True)
         st.session_state["message"] = [{"role": "assistant", "content": "你好，有什么可以帮助你？"}]
-        st.toast("对话历史已清空", icon="🗑️")
+        if clear_succeeded:
+            st.toast("对话历史已清空", icon="🗑️")
+        else:
+            st.warning("部分对话历史清理失败，请稍后重试。")
         time.sleep(0.3)
         st.rerun()
 
@@ -362,7 +374,7 @@ if "message" not in st.session_state:
     history_start = time.time()
     try:
         native_messages = (
-            load_native_thread_messages(conversation_id)
+            load_native_thread_messages(conversation_id, user_id)
             if native_memory_requested()
             else None
         )
@@ -373,6 +385,16 @@ if "message" not in st.session_state:
             past_messages = history.messages
         else:
             past_messages = native_messages
+        if not past_messages and native_messages is not None:
+            # An empty native checkpoint is not authoritative during rollout;
+            # preserve a legacy transcript that may still contain the window.
+            try:
+                legacy_history = FileChatMessageHistory(
+                    session_id=ConversationRepository.legacy_session_id(conversation_id)
+                )
+                past_messages = legacy_history.messages
+            except Exception as exc:
+                print(f"[WARN] legacy history fallback failed: {exc}", flush=True)
         if past_messages:
             ui_messages = []
             for msg in past_messages:
