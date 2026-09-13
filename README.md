@@ -173,6 +173,16 @@ LONG_TERM_MEMORY_ENABLED=true      # 阶段四 BaseStore；需先执行长期记
 连接失败会回退到 legacy 链路；会话清理只删除 checkpoint 与 transcript，不会级联删除长期记忆。
 私有 schema 默认撤销 `anon`/`authenticated` 权限，不能通过 Supabase Data API 访问。
 
+阶段六 pgvector 迁移默认仍使用 Chroma。目标表位于私有 `app_private` schema，向量维度固定为 `1024`（对应 `text-embedding-v4`）。建议按以下顺序灰度：
+
+```text
+VECTOR_BACKEND=chroma
+VECTOR_DUAL_WRITE=true       # 写入 Chroma + pgvector，失败记录 vector_sync_outbox
+VECTOR_SHADOW_QUERY=true    # 读取仍用 Chroma，同时记录两端 Top-K overlap 与延迟
+```
+
+确认真实 Supabase 隔离 schema 中回填记录数、用户隔离、召回 overlap、P50/P95 和 outbox 积压均达标后，才切换 `VECTOR_BACKEND=pgvector`。保留 `VECTOR_DUAL_WRITE=true` 可继续保留 Chroma 回滚副本；切回时将 `VECTOR_BACKEND` 改回 `chroma`。当前仓库未包含真实 Supabase 凭据，迁移 dry-run、回填和性能门槛必须在部署环境执行。
+
 
 知识库上传者归属迁移：如果项目已部署过旧版本，请先在 Supabase SQL Editor 中执行
 `migrations/001_kb_uploader_attribution.sql`，再部署新代码。种子知识显示为“小曹（系统预置）”，

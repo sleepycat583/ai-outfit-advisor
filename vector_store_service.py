@@ -71,13 +71,13 @@ class VectorStoreService(object):
         if self._chroma_enabled:
             self._get_chroma().add_texts(texts=texts, metadatas=metadatas, ids=ids)
         if config.VECTOR_BACKEND == "pgvector" or config.VECTOR_DUAL_WRITE:
-            vectors = self._embed_documents(texts)
-            docs = [VectorDocument(doc_id=doc_id, content=text, metadata=metadata, embedding=vector) for doc_id, text, metadata, vector in zip(ids, texts, metadatas, vectors)]
             try:
+                vectors = self._embed_documents(texts)
+                docs = [VectorDocument(doc_id=doc_id, content=text, metadata=metadata, embedding=vector) for doc_id, text, metadata, vector in zip(ids, texts, metadatas, vectors)]
                 self._get_pgvector_store().upsert(docs, source_kind="knowledge")
             except Exception as error:
-                for doc in docs:
-                    self._get_pgvector_store().record_sync_failure(source_kind="knowledge", operation="upsert", doc_id=doc.doc_id, payload={"content": doc.content, "metadata": doc.metadata, "embedding": list(doc.embedding)}, error=error)
+                for doc_id, text, metadata in zip(ids, texts, metadatas):
+                    self._get_pgvector_store().record_sync_failure(source_kind="knowledge", operation="upsert", doc_id=doc_id, payload={"content": text, "metadata": metadata}, error=error)
                 if config.VECTOR_BACKEND == "pgvector":
                     raise
                 print(f"[WARN] knowledge pgvector dual-write failed: {error}", flush=True)
