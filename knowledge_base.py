@@ -18,6 +18,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 import config_data as config
 from supabase_config import get_supabase_client
+from vector_store_service import VectorStoreService
 
 SEEDS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seeds")
 SYSTEM_OPERATOR_ID = "system"
@@ -49,12 +50,21 @@ class KnowledgeBaseService(object):
 
         os.makedirs(persist_dir, exist_ok=True)
 
-        self.chroma = Chroma(
-            collection_name=collection_name,
-            embedding_function=DashScopeEmbeddings(model=config.EMBEDDING_MODEL_NAME),
-            persist_directory=persist_dir,
-        )
+        self._chroma_config = {
+            "collection_name": collection_name,
+            "embedding_function": DashScopeEmbeddings(model=config.EMBEDDING_MODEL_NAME),
+            "persist_directory": persist_dir,
+        }
+        self.chroma = None
+        if config.VECTOR_BACKEND != "pgvector" or config.VECTOR_DUAL_WRITE:
+            self.chroma = Chroma(**self._chroma_config)
         self.collection_name = collection_name
+        self.vector_service = None
+        if config.VECTOR_BACKEND == "pgvector" or config.VECTOR_DUAL_WRITE:
+            self.vector_service = VectorStoreService(
+                embedding=DashScopeEmbeddings(model=config.EMBEDDING_MODEL_NAME),
+                user_id=user_id,
+            )
 
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=config.chunk_size,
@@ -65,13 +75,18 @@ class KnowledgeBaseService(object):
 
         self._rebuild_index()
 
+    def _get_chroma(self):
+        if self.chroma is None:
+            self.chroma = Chroma(**self._chroma_config)
+        return self.chroma
+
     # ------------------------------------------------------------------
     # 索引重建
     # ------------------------------------------------------------------
 
     def _collection_count(self) -> int:
         try:
-            result = self.chroma.get(limit=1)
+            result = self._get_chroma().get(limit=1)
             return len(result.get("ids", []))
         except Exception:
             return 0
@@ -82,6 +97,11 @@ class KnowledgeBaseService(object):
         1. 如果索引非空，跳过（已经由之前的操作构建）
         2. 否则：导入 seeds/ + 从 Supabase 恢复用户上传内容
         """
+        if config.VECTOR_BACKEND == "pgvector" and not config.VECTOR_DUAL_WRITE:
+            self._import_seeds()
+            self._restore_user_uploads()
+            return
+
         if self._collection_count() > 0:
             self._migrate_chroma_metadata()
             return
@@ -132,10 +152,9 @@ class KnowledgeBaseService(object):
                 "metadata_version": METADATA_VERSION,
             }
 
-            self.chroma.add_texts(
-                chunks,
-                metadatas=[metadata for _ in chunks],
-            )
+            if config.VECTOR_BACKEND != "pgvector" or config.VECTOR_DUAL_WRITE:
+                self._get_chroma().add_texts(chunks, metadatas=[metadata for _ in chunks])
+            self._sync_pgvector(chunks, metadata, f"[种子] {filename}")
             self._md5_save(
                 md5_hex,
                 f"[种子] {filename}",
@@ -179,10 +198,9 @@ class KnowledgeBaseService(object):
 
             metadata = self._document_metadata(row)
 
-            self.chroma.add_texts(
-                chunks,
-                metadatas=[metadata for _ in chunks],
-            )
+            if config.VECTOR_BACKEND != "pgvector" or config.VECTOR_DUAL_WRITE:
+                self._get_chroma().add_texts(chunks, metadatas=[metadata for _ in chunks])
+            self._sync_pgvector(chunks, metadata, source)
             restored += 1
 
         if restored > 0:
@@ -284,15 +302,20 @@ class KnowledgeBaseService(object):
         }
 
     def _source_exists(self, source: str) -> bool:
+        if config.VECTOR_BACKEND == "pgvector" and not config.VECTOR_DUAL_WRITE:
+            return any(
+                document["metadata"].get("source") == source
+                for document in self.vector_service._get_pgvector_store().list_documents(source_kind="knowledge")
+            )
         try:
-            result = self.chroma.get(where={"source": source}, limit=1)
+            result = self._get_chroma().get(where={"source": source}, limit=1)
             return bool(result.get("ids", []))
         except Exception:
             return False
 
     def _migrate_chroma_metadata(self) -> None:
         """将旧索引中缺失作者字段或错误作者的元数据升级到 v2。"""
-        result = self.chroma.get(include=["metadatas"])
+        result = self._get_chroma().get(include=["metadatas"])
         ids = result.get("ids", [])
         metadatas = result.get("metadatas", [])
         update_ids = []
@@ -316,7 +339,7 @@ class KnowledgeBaseService(object):
 
         if update_ids:
             # LangChain 的 Chroma 封装没有 update 方法，元数据迁移需调用原生 collection API。
-            self.chroma._collection.update(
+            self._get_chroma()._collection.update(
                 ids=update_ids,
                 metadatas=update_metadatas,
             )
@@ -349,10 +372,12 @@ class KnowledgeBaseService(object):
             "metadata_version": METADATA_VERSION,
         }
 
-        self.chroma.add_texts(
-            knowledge_chunks,
-            metadatas=[metadata for _ in knowledge_chunks],
-        )
+        if config.VECTOR_BACKEND != "pgvector" or config.VECTOR_DUAL_WRITE:
+            self._get_chroma().add_texts(
+                knowledge_chunks,
+                metadatas=[metadata for _ in knowledge_chunks],
+            )
+        self._sync_pgvector(knowledge_chunks, metadata, filename)
 
         # 持久化到 Supabase，确保容器重启后可恢复
         self._md5_save(
@@ -368,9 +393,14 @@ class KnowledgeBaseService(object):
 
     def get_stats(self) -> dict:
         """返回知识库统计信息。"""
-        result = self.chroma.get(include=["metadatas"])
-        ids = result.get("ids", [])
-        metadatas = result.get("metadatas", [])
+        if config.VECTOR_BACKEND == "pgvector" and not config.VECTOR_DUAL_WRITE:
+            documents = self.vector_service._get_pgvector_store().list_documents(source_kind="knowledge")
+            ids = [document["id"] for document in documents]
+            metadatas = [document["metadata"] for document in documents]
+        else:
+            result = self._get_chroma().get(include=["metadatas"])
+            ids = result.get("ids", [])
+            metadatas = result.get("metadatas", [])
 
         total_chunks = len(ids)
 
@@ -408,13 +438,19 @@ class KnowledgeBaseService(object):
 
     def delete_by_source(self, source: str) -> int:
         """删除指定来源的所有文档段。返回删除数量。"""
-        result = self.chroma.get(
-            where={"source": source},
-            include=["metadatas"],
-        )
-        ids = result.get("ids", [])
+        if config.VECTOR_BACKEND == "pgvector" and not config.VECTOR_DUAL_WRITE:
+            documents = [
+                document for document in self.vector_service._get_pgvector_store().list_documents(source_kind="knowledge")
+                if document["metadata"].get("source") == source
+            ]
+            ids = [document["id"] for document in documents]
+        else:
+            result = self._get_chroma().get(where={"source": source}, include=["metadatas"])
+            ids = result.get("ids", [])
         if ids:
-            self.chroma.delete(ids=ids)
+            self._get_chroma().delete(ids=ids)
+            if self.vector_service:
+                self.vector_service.delete(ids)
 
         # 同时从 Supabase 中删除
         self.supabase.table("kb_documents").delete().eq(
@@ -425,10 +461,15 @@ class KnowledgeBaseService(object):
 
     def clear_all(self) -> int:
         """清空当前知识库的所有数据。返回删除数量。"""
-        result = self.chroma.get()
-        ids = result.get("ids", [])
+        if config.VECTOR_BACKEND == "pgvector" and not config.VECTOR_DUAL_WRITE:
+            ids = [document["id"] for document in self.vector_service._get_pgvector_store().list_documents(source_kind="knowledge")]
+        else:
+            result = self._get_chroma().get()
+            ids = result.get("ids", [])
         if ids:
-            self.chroma.delete(ids=ids)
+            self._get_chroma().delete(ids=ids)
+            if self.vector_service:
+                self.vector_service.delete(ids)
 
         # 同时清空 Supabase 中的记录
         self.supabase.table("kb_documents").delete().eq(
@@ -436,6 +477,17 @@ class KnowledgeBaseService(object):
         ).execute()
 
         return len(ids)
+
+    def _sync_pgvector(self, chunks: list[str], metadata: dict, source: str) -> None:
+        """将知识库 chunk 双写到 pgvector，Chroma 仍作为默认主索引。"""
+        if not self.vector_service or not chunks:
+            return
+        ids = [get_string_md5(f"{self.user_id}\x1f{source}\x1f{index}\x1f{chunk}") for index, chunk in enumerate(chunks)]
+        self.vector_service.add_texts(
+            chunks,
+            metadatas=[metadata for _ in chunks],
+            ids=ids,
+        )
 
 
 if __name__ == "__main__":

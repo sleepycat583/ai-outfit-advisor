@@ -1,7 +1,11 @@
 import os
 import time
+import hashlib
+import json
 
 from langchain_chroma import Chroma
+from langchain_core.documents import Document
+from langchain_core.runnables import RunnableLambda
 import config_data as config
 from pgvector_store import PgVectorStore, VectorDocument
 from supabase_config import get_database_url
@@ -13,7 +17,10 @@ def _pgvector_connection():
         raise RuntimeError("未配置 SUPABASE_DB_URL，无法访问 pgvector")
     import psycopg
 
-    return psycopg.connect(connection_string, autocommit=False)
+    conn = psycopg.connect(connection_string, autocommit=False)
+    with conn.cursor() as cursor:
+        cursor.execute('SET search_path TO "app_private", extensions')
+    return conn
 
 
 class VectorStoreService(object):
@@ -22,22 +29,101 @@ class VectorStoreService(object):
         start_time = time.time()
         self.embedding = embedding
         self.user_id = user_id
-
-        persist_dir = os.path.join(config.persist_directory, user_id, "kb") if user_id else os.path.join(config.persist_directory, "kb")
-        collection_name = f"kb_{user_id}" if user_id else "kb_default"
-
-        os.makedirs(persist_dir, exist_ok=True)
-
-        self.vector_store = Chroma(
-            collection_name=collection_name,
-            embedding_function=self.embedding,
-            persist_directory=persist_dir,
-        )
+        self._chroma_enabled = config.VECTOR_BACKEND != "pgvector" or config.VECTOR_DUAL_WRITE
+        self.vector_store = None
+        if self._chroma_enabled:
+            self.vector_store = self._create_chroma()
         print(f"[PERF] VectorStoreService.__init__ took {time.time() - start_time:.3f}s", flush=True)
+
+    def _create_chroma(self):
+        persist_dir = os.path.join(config.persist_directory, self.user_id, "kb") if self.user_id else os.path.join(config.persist_directory, "kb")
+        collection_name = f"kb_{self.user_id}" if self.user_id else "kb_default"
+        os.makedirs(persist_dir, exist_ok=True)
+        return Chroma(collection_name=collection_name, embedding_function=self.embedding, persist_directory=persist_dir)
+
+    def _get_chroma(self):
+        if self.vector_store is None:
+            self.vector_store = self._create_chroma()
+        return self.vector_store
+
+    def _get_pgvector_store(self) -> PgVectorStore:
+        if not hasattr(self, "_pgvector_store") or self._pgvector_store is None:
+            self._pgvector_store = PgVectorStore(_pgvector_connection, embedding=self.embedding, user_id=self.user_id)
+        return self._pgvector_store
+
+    def _embed_documents(self, texts):
+        method = getattr(self.embedding, "embed_documents", None)
+        if not callable(method):
+            raise RuntimeError("当前 embedding 实现不支持 embed_documents")
+        vectors = [list(vector) for vector in method(list(texts))]
+        if len(vectors) != len(texts):
+            raise RuntimeError("embedding 返回数量与待写入文档数量不一致")
+        return vectors
+
+    def add_texts(self, texts, *, metadatas=None, ids=None) -> list[str]:
+        texts = list(texts)
+        metadatas = list(metadatas or [{} for _ in texts])
+        if len(metadatas) != len(texts):
+            raise ValueError("metadatas 数量必须与 texts 一致")
+        ids = list(ids or [hashlib.sha256(f"{self.user_id}\x1f{i}\x1f{text}".encode()).hexdigest() for i, text in enumerate(texts)])
+        if len(ids) != len(texts):
+            raise ValueError("ids 数量必须与 texts 一致")
+        if self._chroma_enabled:
+            self._get_chroma().add_texts(texts=texts, metadatas=metadatas, ids=ids)
+        if config.VECTOR_BACKEND == "pgvector" or config.VECTOR_DUAL_WRITE:
+            vectors = self._embed_documents(texts)
+            docs = [VectorDocument(doc_id=doc_id, content=text, metadata=metadata, embedding=vector) for doc_id, text, metadata, vector in zip(ids, texts, metadatas, vectors)]
+            try:
+                self._get_pgvector_store().upsert(docs, source_kind="knowledge")
+            except Exception as error:
+                for doc in docs:
+                    self._get_pgvector_store().record_sync_failure(source_kind="knowledge", operation="upsert", doc_id=doc.doc_id, payload={"content": doc.content, "metadata": doc.metadata, "embedding": list(doc.embedding)}, error=error)
+                if config.VECTOR_BACKEND == "pgvector":
+                    raise
+                print(f"[WARN] knowledge pgvector dual-write failed: {error}", flush=True)
+        return ids
+
+    def delete(self, ids):
+        ids = list(ids)
+        if self._chroma_enabled:
+            self._get_chroma().delete(ids=ids)
+        if config.VECTOR_BACKEND == "pgvector" or config.VECTOR_DUAL_WRITE:
+            try:
+                self._get_pgvector_store().delete(ids, source_kind="knowledge")
+            except Exception as error:
+                for doc_id in ids:
+                    self._get_pgvector_store().record_sync_failure(source_kind="knowledge", operation="delete", doc_id=doc_id, payload={}, error=error)
+                if config.VECTOR_BACKEND == "pgvector":
+                    raise
+
+    def search(self, query: str, k: int = 4):
+        start_time = time.time()
+        embed_query = getattr(self.embedding, "embed_query", None)
+        if config.VECTOR_BACKEND == "pgvector":
+            if not callable(embed_query):
+                raise RuntimeError("当前 embedding 实现不支持 embed_query")
+            results = self._get_pgvector_store().search(embed_query(query), source_kind="knowledge", limit=k)
+            print(json.dumps({"event": "pgvector_search", "source_kind": "knowledge", "count": len(results), "latency_ms": round((time.time() - start_time) * 1000, 2)}, ensure_ascii=False), flush=True)
+            return [Document(page_content=result["content"], metadata=result["metadata"]) for result in results]
+        chroma_docs = self._get_chroma().similarity_search(query, k=k)
+        if config.VECTOR_SHADOW_QUERY and callable(embed_query):
+            shadow_start = time.time()
+            try:
+                shadow = self._get_pgvector_store().search(embed_query(query), source_kind="knowledge", limit=k)
+                primary = {doc.page_content for doc in chroma_docs}
+                shadow_set = {item["content"] for item in shadow}
+                overlap = len(primary & shadow_set) / max(1, len(primary | shadow_set))
+                print(json.dumps({"event": "vector_shadow", "source_kind": "knowledge", "primary_count": len(primary), "shadow_count": len(shadow_set), "overlap": round(overlap, 4), "primary_latency_ms": round((time.time() - start_time) * 1000, 2), "shadow_latency_ms": round((time.time() - shadow_start) * 1000, 2)}, ensure_ascii=False), flush=True)
+            except Exception as error:
+                print(json.dumps({"event": "vector_shadow_error", "source_kind": "knowledge", "error": str(error)[:500]}, ensure_ascii=False), flush=True)
+        return chroma_docs
 
     def get_retriever(self):
         """返回向量库检索器，方便加入 Chain"""
-        return self.vector_store.as_retriever(search_kwargs={"k": int(config.similarity_threshold)})
+        return RunnableLambda(lambda query: self.search(query, k=int(self._limit())))
+
+    def _limit(self):
+        return int(config.similarity_threshold)
 
 
 class VectorWardrobeService:
@@ -52,16 +138,26 @@ class VectorWardrobeService:
         self._pgvector_enabled = (
             config.VECTOR_BACKEND == "pgvector"
             or config.VECTOR_DUAL_WRITE
-            or config.VECTOR_SHADOW_QUERY
         )
         persist_directory = os.path.join(config.persist_directory, user_id, "wardrobe") if user_id else os.path.join(config.persist_directory, "wardrobe")
-        os.makedirs(persist_directory, exist_ok=True)
-        self.vector_store = Chroma(
-            collection_name="wardrobe_items",
-            embedding_function=self.embedding,
-            persist_directory=persist_directory,
-        )
+        self._chroma_config = {
+            "collection_name": "wardrobe_items",
+            "embedding_function": self.embedding,
+            "persist_directory": persist_directory,
+        }
+        self.vector_store = None
+        if config.VECTOR_BACKEND != "pgvector" or config.VECTOR_DUAL_WRITE:
+            self.vector_store = self._create_chroma()
         print(f"[PERF] VectorWardrobeService.__init__ took {time.time() - start_time:.3f}s", flush=True)
+
+    def _create_chroma(self):
+        os.makedirs(self._chroma_config["persist_directory"], exist_ok=True)
+        return Chroma(**self._chroma_config)
+
+    def _get_chroma(self):
+        if self.vector_store is None:
+            self.vector_store = self._create_chroma()
+        return self.vector_store
 
     def _get_pgvector_store(self) -> PgVectorStore:
         if self._pgvector_store is None:
@@ -76,7 +172,10 @@ class VectorWardrobeService:
         embed_documents = getattr(self.embedding, "embed_documents", None)
         if not callable(embed_documents):
             raise RuntimeError("当前 embedding 实现不支持 embed_documents")
-        return [list(vector) for vector in embed_documents(texts)]
+        embeddings = [list(vector) for vector in embed_documents(texts)]
+        if len(embeddings) != len(texts):
+            raise RuntimeError("embedding 返回数量与待写入文档数量不一致")
+        return embeddings
 
     def _pgvector_write(self, items: list[tuple[str, str]]) -> None:
         if not items or not self._pgvector_enabled:
@@ -97,13 +196,29 @@ class VectorWardrobeService:
             raise error
         print(f"[WARN] pgvector shadow/dual-write failed; Chroma remains primary: {error}", flush=True)
 
+    def _record_pgvector_failure(self, operation: str, items: list[tuple[str, str]], error: Exception) -> None:
+        if not self._pgvector_enabled:
+            return
+        try:
+            store = self._get_pgvector_store()
+            for item_id, text in items:
+                store.record_sync_failure(
+                    source_kind="wardrobe",
+                    operation=operation,
+                    doc_id=item_id,
+                    payload={"content": text, "item_id": item_id},
+                    error=error,
+                )
+        except Exception as outbox_error:
+            print(f"[ERROR] failed to record pgvector sync outbox: {outbox_error}", flush=True)
+
     def add_items(self, items: list[tuple[str, str]]) -> None:
         """批量添加单品文本到向量库。items 为 [(item_id, text), ...] 列表。"""
         if not items:
             return
         ids, texts = zip(*items)
-        if config.VECTOR_BACKEND != "pgvector":
-            self.vector_store.add_texts(
+        if config.VECTOR_BACKEND != "pgvector" or config.VECTOR_DUAL_WRITE:
+            self._get_chroma().add_texts(
                 texts=list(texts),
                 metadatas=[{"item_id": iid} for iid in ids],
                 ids=list(ids),
@@ -111,30 +226,32 @@ class VectorWardrobeService:
         try:
             self._pgvector_write(items)
         except Exception as error:
+            self._record_pgvector_failure("upsert", items, error)
             self._handle_pgvector_error(error)
 
     def update_items(self, items: list[tuple[str, str]]) -> None:
         """批量更新单品文本。先删后加，避免 Chroma update 的 upsert 行为不一致。"""
         if not items:
             return
-        if config.VECTOR_BACKEND != "pgvector":
+        if config.VECTOR_BACKEND != "pgvector" or config.VECTOR_DUAL_WRITE:
             ids_to_del = [iid for iid, _ in items]
-            existing = self.vector_store.get(ids=ids_to_del)
+            existing = self._get_chroma().get(ids=ids_to_del)
             if existing and existing.get("ids"):
-                self.vector_store.delete(ids=existing["ids"])
+                self._get_chroma().delete(ids=existing["ids"])
         self.add_items(items)
 
     def delete_items(self, item_ids: list[str]) -> None:
         if not item_ids:
             return
-        if config.VECTOR_BACKEND != "pgvector":
-            existing = self.vector_store.get(ids=item_ids)
+        if config.VECTOR_BACKEND != "pgvector" or config.VECTOR_DUAL_WRITE:
+            existing = self._get_chroma().get(ids=item_ids)
             if existing and existing.get("ids"):
-                self.vector_store.delete(ids=existing["ids"])
+                self._get_chroma().delete(ids=existing["ids"])
         if self._pgvector_enabled:
             try:
                 self._get_pgvector_store().delete(item_ids, source_kind="wardrobe")
             except Exception as error:
+                self._record_pgvector_failure("delete", [(item_id, "") for item_id in item_ids], error)
                 self._handle_pgvector_error(error)
 
     def search(self, query: str, k: int = 15) -> list[str]:
@@ -151,8 +268,8 @@ class VectorWardrobeService:
                 return [result["content"] for result in results]
             except Exception as error:
                 self._handle_pgvector_error(error)
-        docs = self.vector_store.similarity_search(query, k=k)
-        if config.VECTOR_SHADOW_QUERY and self._pgvector_enabled:
+        docs = self._get_chroma().similarity_search(query, k=k)
+        if config.VECTOR_SHADOW_QUERY:
             embed_query = getattr(self.embedding, "embed_query", None)
             if callable(embed_query):
                 try:

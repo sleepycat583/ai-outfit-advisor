@@ -8,11 +8,13 @@ query behavior without replacing the database API with a mock client.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Sequence
 
 
 _SOURCE_KINDS = {"knowledge", "wardrobe"}
+VECTOR_DIMENSION = 1024
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,10 @@ def _vector_literal(values: Iterable[float]) -> str:
     numbers = [float(value) for value in values]
     if not numbers:
         raise ValueError("embedding 不能为空")
+    if len(numbers) != VECTOR_DIMENSION:
+        raise ValueError(f"embedding 维度必须为 {VECTOR_DIMENSION}")
+    if not all(math.isfinite(value) for value in numbers):
+        raise ValueError("embedding 必须是有限数字")
     return "[" + ",".join(format(value, ".12g") for value in numbers) + "]"
 
 
@@ -141,6 +147,69 @@ class PgVectorStore:
                 deleted = len(cursor.fetchall())
             conn.commit()
             return deleted
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def list_documents(self, *, source_kind: str) -> list[dict[str, Any]]:
+        source_kind = self._validate_source_kind(source_kind)
+        conn = self._connection_factory()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """SELECT doc_id, content, metadata
+                       FROM app_private.vector_documents
+                       WHERE source_kind = %s AND user_id = %s
+                       ORDER BY updated_at DESC""",
+                    (source_kind, self.user_id),
+                )
+                rows = cursor.fetchall()
+            return [
+                {"id": row[0], "content": row[1], "metadata": row[2] or {}}
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    def record_sync_failure(
+        self,
+        *,
+        source_kind: str,
+        operation: str,
+        doc_id: str,
+        payload: dict[str, Any],
+        error: Exception,
+    ) -> None:
+        source_kind = self._validate_source_kind(source_kind)
+        if operation not in {"upsert", "delete"}:
+            raise ValueError("operation 必须是 upsert 或 delete")
+        if not doc_id:
+            raise ValueError("doc_id 不能为空")
+        conn = self._connection_factory()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """INSERT INTO app_private.vector_sync_outbox
+                       (source_kind, user_id, operation, doc_id, payload, last_error)
+                       VALUES (%s, %s, %s, %s, %s::jsonb, %s)
+                       ON CONFLICT (source_kind, user_id, operation, doc_id) DO UPDATE SET
+                         payload = EXCLUDED.payload,
+                         last_error = EXCLUDED.last_error,
+                         attempts = app_private.vector_sync_outbox.attempts + 1,
+                         available_at = now(),
+                         updated_at = now()""",
+                    (
+                        source_kind,
+                        self.user_id,
+                        operation,
+                        doc_id,
+                        json.dumps(payload, ensure_ascii=False),
+                        str(error)[:2000],
+                    ),
+                )
+            conn.commit()
         except Exception:
             conn.rollback()
             raise
