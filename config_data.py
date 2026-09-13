@@ -57,6 +57,10 @@ chat_history_summary_max_chars = 1200
 # until the native Postgres-backed implementation has passed its rollout checks.
 MEMORY_BACKEND = os.getenv("MEMORY_BACKEND", "legacy").strip().lower()
 VECTOR_BACKEND = os.getenv("VECTOR_BACKEND", "chroma").strip().lower()
+if VECTOR_BACKEND not in {"chroma", "pgvector"}:
+    raise ValueError("VECTOR_BACKEND 仅支持 chroma 或 pgvector")
+VECTOR_DUAL_WRITE = _env_bool("VECTOR_DUAL_WRITE", default=False)
+VECTOR_SHADOW_QUERY = _env_bool("VECTOR_SHADOW_QUERY", default=False)
 # Native checkpoint rollouts keep the legacy transcript in sync so that a
 # failed Postgres connection can be rolled back without losing the UI history.
 # The default is intentionally conservative for the existing legacy backend.

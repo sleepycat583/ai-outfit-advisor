@@ -3,6 +3,17 @@ import time
 
 from langchain_chroma import Chroma
 import config_data as config
+from pgvector_store import PgVectorStore, VectorDocument
+from supabase_config import get_database_url
+
+
+def _pgvector_connection():
+    connection_string = (get_database_url() or "").strip()
+    if not connection_string:
+        raise RuntimeError("未配置 SUPABASE_DB_URL，无法访问 pgvector")
+    import psycopg
+
+    return psycopg.connect(connection_string, autocommit=False)
 
 
 class VectorStoreService(object):
@@ -37,6 +48,12 @@ class VectorWardrobeService:
         start_time = time.time()
         self.embedding = embedding
         self.user_id = user_id
+        self._pgvector_store = None
+        self._pgvector_enabled = (
+            config.VECTOR_BACKEND == "pgvector"
+            or config.VECTOR_DUAL_WRITE
+            or config.VECTOR_SHADOW_QUERY
+        )
         persist_directory = os.path.join(config.persist_directory, user_id, "wardrobe") if user_id else os.path.join(config.persist_directory, "wardrobe")
         os.makedirs(persist_directory, exist_ok=True)
         self.vector_store = Chroma(
@@ -46,38 +63,104 @@ class VectorWardrobeService:
         )
         print(f"[PERF] VectorWardrobeService.__init__ took {time.time() - start_time:.3f}s", flush=True)
 
+    def _get_pgvector_store(self) -> PgVectorStore:
+        if self._pgvector_store is None:
+            self._pgvector_store = PgVectorStore(
+                _pgvector_connection,
+                embedding=self.embedding,
+                user_id=self.user_id,
+            )
+        return self._pgvector_store
+
+    def _embed_documents(self, texts: list[str]) -> list[list[float]]:
+        embed_documents = getattr(self.embedding, "embed_documents", None)
+        if not callable(embed_documents):
+            raise RuntimeError("当前 embedding 实现不支持 embed_documents")
+        return [list(vector) for vector in embed_documents(texts)]
+
+    def _pgvector_write(self, items: list[tuple[str, str]]) -> None:
+        if not items or not self._pgvector_enabled:
+            return
+        documents = [
+            VectorDocument(
+                doc_id=item_id,
+                content=text,
+                metadata={"item_id": item_id},
+                embedding=embedding,
+            )
+            for (item_id, text), embedding in zip(items, self._embed_documents([text for _, text in items]))
+        ]
+        self._get_pgvector_store().upsert(documents, source_kind="wardrobe")
+
+    def _handle_pgvector_error(self, error: Exception) -> None:
+        if config.VECTOR_BACKEND == "pgvector":
+            raise error
+        print(f"[WARN] pgvector shadow/dual-write failed; Chroma remains primary: {error}", flush=True)
+
     def add_items(self, items: list[tuple[str, str]]) -> None:
         """批量添加单品文本到向量库。items 为 [(item_id, text), ...] 列表。"""
         if not items:
             return
         ids, texts = zip(*items)
-        self.vector_store.add_texts(
-            texts=list(texts),
-            metadatas=[{"item_id": iid} for iid in ids],
-            ids=list(ids),
-        )
+        if config.VECTOR_BACKEND != "pgvector":
+            self.vector_store.add_texts(
+                texts=list(texts),
+                metadatas=[{"item_id": iid} for iid in ids],
+                ids=list(ids),
+            )
+        try:
+            self._pgvector_write(items)
+        except Exception as error:
+            self._handle_pgvector_error(error)
 
     def update_items(self, items: list[tuple[str, str]]) -> None:
         """批量更新单品文本。先删后加，避免 Chroma update 的 upsert 行为不一致。"""
         if not items:
             return
-        ids_to_del = [iid for iid, _ in items]
-        existing = self.vector_store.get(ids=ids_to_del)
-        if existing and existing.get("ids"):
-            self.vector_store.delete(ids=existing["ids"])
+        if config.VECTOR_BACKEND != "pgvector":
+            ids_to_del = [iid for iid, _ in items]
+            existing = self.vector_store.get(ids=ids_to_del)
+            if existing and existing.get("ids"):
+                self.vector_store.delete(ids=existing["ids"])
         self.add_items(items)
 
     def delete_items(self, item_ids: list[str]) -> None:
         if not item_ids:
             return
-        existing = self.vector_store.get(ids=item_ids)
-        if existing and existing.get("ids"):
-            self.vector_store.delete(ids=existing["ids"])
+        if config.VECTOR_BACKEND != "pgvector":
+            existing = self.vector_store.get(ids=item_ids)
+            if existing and existing.get("ids"):
+                self.vector_store.delete(ids=existing["ids"])
+        if self._pgvector_enabled:
+            try:
+                self._get_pgvector_store().delete(item_ids, source_kind="wardrobe")
+            except Exception as error:
+                self._handle_pgvector_error(error)
 
     def search(self, query: str, k: int = 15) -> list[str]:
         """语义检索最相关的 Top-K 单品描述文本，并打印检索耗时。"""
         start_time = time.time()
+        if config.VECTOR_BACKEND == "pgvector":
+            embed_query = getattr(self.embedding, "embed_query", None)
+            if not callable(embed_query):
+                raise RuntimeError("当前 embedding 实现不支持 embed_query")
+            try:
+                results = self._get_pgvector_store().search(
+                    embed_query(query), source_kind="wardrobe", limit=k
+                )
+                return [result["content"] for result in results]
+            except Exception as error:
+                self._handle_pgvector_error(error)
         docs = self.vector_store.similarity_search(query, k=k)
+        if config.VECTOR_SHADOW_QUERY and self._pgvector_enabled:
+            embed_query = getattr(self.embedding, "embed_query", None)
+            if callable(embed_query):
+                try:
+                    self._get_pgvector_store().search(
+                        embed_query(query), source_kind="wardrobe", limit=k
+                    )
+                except Exception as error:
+                    self._handle_pgvector_error(error)
         print(f"[PERF] VectorWardrobeService.search took {time.time() - start_time:.3f}s", flush=True)
         return [doc.page_content for doc in docs]
 
