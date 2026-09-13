@@ -5,6 +5,7 @@ BEGIN;
 
 CREATE SCHEMA IF NOT EXISTS extensions;
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE SCHEMA IF NOT EXISTS app_private;
 REVOKE ALL ON SCHEMA app_private FROM PUBLIC, anon, authenticated;
 
@@ -27,12 +28,15 @@ CREATE TABLE IF NOT EXISTS app_private.vector_sync_outbox (
     operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
     doc_id TEXT NOT NULL,
     payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'processing', 'succeeded', 'dead_letter')),
     attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     last_error TEXT,
+    lease_token UUID,
+    lease_until TIMESTAMPTZ,
     available_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (source_kind, user_id, operation, doc_id)
+    UNIQUE (source_kind, user_id, doc_id)
 );
 
 CREATE INDEX IF NOT EXISTS vector_documents_user_source_idx
@@ -42,6 +46,8 @@ CREATE INDEX IF NOT EXISTS vector_documents_embedding_hnsw_idx
 
 REVOKE ALL ON app_private.vector_documents FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON app_private.vector_sync_outbox FROM PUBLIC, anon, authenticated;
+ALTER TABLE app_private.vector_documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app_private.vector_sync_outbox ENABLE ROW LEVEL SECURITY;
 
 INSERT INTO app_private.memory_migrations (migration_key, completed_at, status, details)
 VALUES (

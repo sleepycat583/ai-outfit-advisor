@@ -104,6 +104,11 @@ class KnowledgeBaseService(object):
 
         if self._collection_count() > 0:
             self._migrate_chroma_metadata()
+            if self.vector_service and config.VECTOR_DUAL_WRITE:
+                try:
+                    self.vector_service.backfill_from_chroma()
+                except Exception as exc:
+                    print(f"[WARN] pgvector startup backfill skipped: {exc}", flush=True)
             return
 
         # Step 1: 导入种子知识
@@ -134,7 +139,7 @@ class KnowledgeBaseService(object):
             md5_hex = get_string_md5(content)
 
             # 检查是否已导入（Supabase MD5 去重）
-            if self._md5_exists(md5_hex):
+            if self._md5_exists(md5_hex) and not self._needs_pgvector_seed_sync(f"[种子] {filename}"):
                 continue
 
             if len(content) > config.max_split_char_number:
@@ -152,17 +157,19 @@ class KnowledgeBaseService(object):
                 "metadata_version": METADATA_VERSION,
             }
 
+            ids = self._chunk_ids(chunks, metadata["source"])
             if config.VECTOR_BACKEND != "pgvector" or config.VECTOR_DUAL_WRITE:
-                self._get_chroma().add_texts(chunks, metadatas=[metadata for _ in chunks])
+                self._get_chroma().add_texts(chunks, metadatas=[metadata for _ in chunks], ids=ids)
             self._sync_pgvector(chunks, metadata, f"[种子] {filename}")
-            self._md5_save(
-                md5_hex,
-                f"[种子] {filename}",
-                content,
-                operator_id=SYSTEM_OPERATOR_ID,
-                operator_name=config.DEFAULT_OPERATOR,
-                source_type="seed",
-            )
+            if not self._md5_exists(md5_hex):
+                self._md5_save(
+                    md5_hex,
+                    f"[种子] {filename}",
+                    content,
+                    operator_id=SYSTEM_OPERATOR_ID,
+                    operator_name=config.DEFAULT_OPERATOR,
+                    source_type="seed",
+                )
             imported += 1
 
         if imported > 0:
@@ -198,8 +205,9 @@ class KnowledgeBaseService(object):
 
             metadata = self._document_metadata(row)
 
+            ids = self._chunk_ids(chunks, source)
             if config.VECTOR_BACKEND != "pgvector" or config.VECTOR_DUAL_WRITE:
-                self._get_chroma().add_texts(chunks, metadatas=[metadata for _ in chunks])
+                self._get_chroma().add_texts(chunks, metadatas=[metadata for _ in chunks], ids=ids)
             self._sync_pgvector(chunks, metadata, source)
             restored += 1
 
@@ -313,6 +321,13 @@ class KnowledgeBaseService(object):
         except Exception:
             return False
 
+    def _needs_pgvector_seed_sync(self, source: str) -> bool:
+        if not self.vector_service:
+            return False
+        if config.VECTOR_BACKEND == "pgvector" and not config.VECTOR_DUAL_WRITE:
+            return not self._source_exists(source)
+        return False
+
     def _migrate_chroma_metadata(self) -> None:
         """将旧索引中缺失作者字段或错误作者的元数据升级到 v2。"""
         result = self._get_chroma().get(include=["metadatas"])
@@ -373,9 +388,11 @@ class KnowledgeBaseService(object):
         }
 
         if config.VECTOR_BACKEND != "pgvector" or config.VECTOR_DUAL_WRITE:
+            ids = self._chunk_ids(knowledge_chunks, filename)
             self._get_chroma().add_texts(
                 knowledge_chunks,
                 metadatas=[metadata for _ in knowledge_chunks],
+                ids=ids,
             )
         self._sync_pgvector(knowledge_chunks, metadata, filename)
 
@@ -447,10 +464,10 @@ class KnowledgeBaseService(object):
         else:
             result = self._get_chroma().get(where={"source": source}, include=["metadatas"])
             ids = result.get("ids", [])
-        if ids:
+        if ids and (config.VECTOR_BACKEND != "pgvector" or config.VECTOR_DUAL_WRITE):
             self._get_chroma().delete(ids=ids)
-            if self.vector_service:
-                self.vector_service.delete(ids)
+        if self.vector_service:
+            self.vector_service.delete_by_metadata("source", source)
 
         # 同时从 Supabase 中删除
         self.supabase.table("kb_documents").delete().eq(
@@ -466,10 +483,10 @@ class KnowledgeBaseService(object):
         else:
             result = self._get_chroma().get()
             ids = result.get("ids", [])
-        if ids:
+        if ids and (config.VECTOR_BACKEND != "pgvector" or config.VECTOR_DUAL_WRITE):
             self._get_chroma().delete(ids=ids)
-            if self.vector_service:
-                self.vector_service.delete(ids)
+        if self.vector_service:
+            self.vector_service.delete_all()
 
         # 同时清空 Supabase 中的记录
         self.supabase.table("kb_documents").delete().eq(
@@ -482,12 +499,18 @@ class KnowledgeBaseService(object):
         """将知识库 chunk 双写到 pgvector，Chroma 仍作为默认主索引。"""
         if not self.vector_service or not chunks:
             return
-        ids = [get_string_md5(f"{self.user_id}\x1f{source}\x1f{index}\x1f{chunk}") for index, chunk in enumerate(chunks)]
+        ids = self._chunk_ids(chunks, source)
         self.vector_service.add_texts(
             chunks,
             metadatas=[metadata for _ in chunks],
             ids=ids,
         )
+
+    def _chunk_ids(self, chunks: list[str], source: str) -> list[str]:
+        return [
+            get_string_md5(f"{self.user_id}\x1f{source}\x1f{index}\x1f{chunk}")
+            for index, chunk in enumerate(chunks)
+        ]
 
 
 if __name__ == "__main__":

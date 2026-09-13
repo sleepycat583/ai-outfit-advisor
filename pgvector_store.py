@@ -153,6 +153,48 @@ class PgVectorStore:
         finally:
             conn.close()
 
+    def delete_by_metadata(self, *, source_kind: str, key: str, value: str) -> int:
+        source_kind = self._validate_source_kind(source_kind)
+        if not key:
+            raise ValueError("metadata key 不能为空")
+        conn = self._connection_factory()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """DELETE FROM app_private.vector_documents
+                       WHERE source_kind = %s AND user_id = %s AND metadata->>%s = %s
+                       RETURNING doc_id""",
+                    (source_kind, self.user_id, key, value),
+                )
+                deleted = len(cursor.fetchall())
+            conn.commit()
+            return deleted
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def delete_all(self, *, source_kind: str) -> int:
+        source_kind = self._validate_source_kind(source_kind)
+        conn = self._connection_factory()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """DELETE FROM app_private.vector_documents
+                       WHERE source_kind = %s AND user_id = %s
+                       RETURNING doc_id""",
+                    (source_kind, self.user_id),
+                )
+                deleted = len(cursor.fetchall())
+            conn.commit()
+            return deleted
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def list_documents(self, *, source_kind: str) -> list[dict[str, Any]]:
         source_kind = self._validate_source_kind(source_kind)
         conn = self._connection_factory()
@@ -170,6 +212,21 @@ class PgVectorStore:
                 {"id": row[0], "content": row[1], "metadata": row[2] or {}}
                 for row in rows
             ]
+        finally:
+            conn.close()
+
+    def count(self, *, source_kind: str) -> int:
+        source_kind = self._validate_source_kind(source_kind)
+        conn = self._connection_factory()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """SELECT COUNT(*) FROM app_private.vector_documents
+                       WHERE source_kind = %s AND user_id = %s""",
+                    (source_kind, self.user_id),
+                )
+                row = cursor.fetchone()
+            return int(row[0])
         finally:
             conn.close()
 
@@ -194,9 +251,13 @@ class PgVectorStore:
                     """INSERT INTO app_private.vector_sync_outbox
                        (source_kind, user_id, operation, doc_id, payload, last_error)
                        VALUES (%s, %s, %s, %s, %s::jsonb, %s)
-                       ON CONFLICT (source_kind, user_id, operation, doc_id) DO UPDATE SET
+                       ON CONFLICT (source_kind, user_id, doc_id) DO UPDATE SET
+                         operation = EXCLUDED.operation,
                          payload = EXCLUDED.payload,
                          last_error = EXCLUDED.last_error,
+                         status = 'queued',
+                         lease_token = NULL,
+                         lease_until = NULL,
                          attempts = app_private.vector_sync_outbox.attempts + 1,
                          available_at = now(),
                          updated_at = now()""",
@@ -210,6 +271,84 @@ class PgVectorStore:
                     ),
                 )
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def claim_sync_events(self, *, limit: int = 50, lease_seconds: int = 120) -> list[dict[str, Any]]:
+        if limit < 1 or lease_seconds < 1:
+            raise ValueError("limit 和 lease_seconds 必须大于 0")
+        conn = self._connection_factory()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """WITH candidates AS (
+                           SELECT id FROM app_private.vector_sync_outbox
+                           WHERE (status = 'queued' OR (status = 'processing' AND lease_until < now()))
+                             AND available_at <= now()
+                           ORDER BY id
+                           FOR UPDATE SKIP LOCKED
+                           LIMIT %s
+                       )
+                       UPDATE app_private.vector_sync_outbox AS outbox
+                       SET status = 'processing', lease_token = gen_random_uuid(),
+                           lease_until = now() + (%s * interval '1 second'), updated_at = now()
+                       FROM candidates
+                       WHERE outbox.id = candidates.id
+                       RETURNING outbox.id, outbox.source_kind, outbox.user_id, outbox.operation,
+                                 outbox.doc_id, outbox.payload, outbox.attempts, outbox.lease_token""",
+                    (limit, lease_seconds),
+                )
+                rows = cursor.fetchall()
+            conn.commit()
+            return [dict(row) if not isinstance(row, tuple) else {"id": row[0], "source_kind": row[1], "user_id": row[2], "operation": row[3], "doc_id": row[4], "payload": row[5], "attempts": row[6], "lease_token": row[7]} for row in rows]
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def complete_sync_event(self, event_id: int, lease_token: str) -> bool:
+        conn = self._connection_factory()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """UPDATE app_private.vector_sync_outbox
+                       SET status = 'succeeded', lease_token = NULL, lease_until = NULL, updated_at = now()
+                       WHERE id = %s AND lease_token = %s AND status = 'processing'
+                       RETURNING id""",
+                    (event_id, lease_token),
+                )
+                completed = bool(cursor.fetchall())
+            conn.commit()
+            return completed
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def fail_sync_event(self, event_id: int, lease_token: str, error: Exception, *, max_attempts: int = 5) -> bool:
+        if max_attempts < 1:
+            raise ValueError("max_attempts 必须大于 0")
+        conn = self._connection_factory()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """UPDATE app_private.vector_sync_outbox
+                       SET attempts = attempts + 1,
+                           status = CASE WHEN attempts + 1 >= %s THEN 'dead_letter' ELSE 'queued' END,
+                           last_error = %s, lease_token = NULL, lease_until = NULL,
+                           available_at = now() + interval '30 seconds', updated_at = now()
+                       WHERE id = %s AND lease_token = %s AND status = 'processing'
+                       RETURNING status""",
+                    (max_attempts, str(error)[:2000], event_id, lease_token),
+                )
+                rows = cursor.fetchall()
+            conn.commit()
+            return bool(rows and rows[0][0] == "dead_letter")
         except Exception:
             conn.rollback()
             raise

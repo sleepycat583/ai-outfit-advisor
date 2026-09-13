@@ -76,8 +76,7 @@ class VectorStoreService(object):
                 docs = [VectorDocument(doc_id=doc_id, content=text, metadata=metadata, embedding=vector) for doc_id, text, metadata, vector in zip(ids, texts, metadatas, vectors)]
                 self._get_pgvector_store().upsert(docs, source_kind="knowledge")
             except Exception as error:
-                for doc_id, text, metadata in zip(ids, texts, metadatas):
-                    self._get_pgvector_store().record_sync_failure(source_kind="knowledge", operation="upsert", doc_id=doc_id, payload={"content": text, "metadata": metadata}, error=error)
+                self._safe_record_failures("upsert", [(doc_id, text, metadata) for doc_id, text, metadata in zip(ids, texts, metadatas)], error)
                 if config.VECTOR_BACKEND == "pgvector":
                     raise
                 print(f"[WARN] knowledge pgvector dual-write failed: {error}", flush=True)
@@ -91,10 +90,17 @@ class VectorStoreService(object):
             try:
                 self._get_pgvector_store().delete(ids, source_kind="knowledge")
             except Exception as error:
-                for doc_id in ids:
-                    self._get_pgvector_store().record_sync_failure(source_kind="knowledge", operation="delete", doc_id=doc_id, payload={}, error=error)
+                self._safe_record_failures("delete", [(doc_id, "", {}) for doc_id in ids], error)
                 if config.VECTOR_BACKEND == "pgvector":
                     raise
+
+    def delete_by_metadata(self, key: str, value: str) -> None:
+        if config.VECTOR_BACKEND == "pgvector" or config.VECTOR_DUAL_WRITE:
+            self._get_pgvector_store().delete_by_metadata(source_kind="knowledge", key=key, value=value)
+
+    def delete_all(self) -> None:
+        if config.VECTOR_BACKEND == "pgvector" or config.VECTOR_DUAL_WRITE:
+            self._get_pgvector_store().delete_all(source_kind="knowledge")
 
     def search(self, query: str, k: int = 4):
         start_time = time.time()
@@ -113,10 +119,41 @@ class VectorStoreService(object):
                 primary = {doc.page_content for doc in chroma_docs}
                 shadow_set = {item["content"] for item in shadow}
                 overlap = len(primary & shadow_set) / max(1, len(primary | shadow_set))
-                print(json.dumps({"event": "vector_shadow", "source_kind": "knowledge", "primary_count": len(primary), "shadow_count": len(shadow_set), "overlap": round(overlap, 4), "primary_latency_ms": round((time.time() - start_time) * 1000, 2), "shadow_latency_ms": round((time.time() - shadow_start) * 1000, 2)}, ensure_ascii=False), flush=True)
+                print(json.dumps({"event": "vector_shadow", "source_kind": "knowledge", "primary_count": len(primary), "shadow_count": len(shadow_set), "overlap": round(overlap, 4), "primary_latency_ms": round((shadow_start - start_time) * 1000, 2), "shadow_latency_ms": round((time.time() - shadow_start) * 1000, 2)}, ensure_ascii=False), flush=True)
             except Exception as error:
                 print(json.dumps({"event": "vector_shadow_error", "source_kind": "knowledge", "error": str(error)[:500]}, ensure_ascii=False), flush=True)
         return chroma_docs
+
+    def _safe_record_failures(self, operation, items, error) -> None:
+        try:
+            store = self._get_pgvector_store()
+            for doc_id, text, metadata in items:
+                store.record_sync_failure(
+                    source_kind="knowledge",
+                    operation=operation,
+                    doc_id=doc_id,
+                    payload={"content": text, "metadata": metadata},
+                    error=error,
+                )
+        except Exception as outbox_error:
+            print(f"[ERROR] failed to record knowledge pgvector outbox: {outbox_error}", flush=True)
+
+    def backfill_from_chroma(self, *, batch_size: int = 64) -> int:
+        """Idempotently copy the current Chroma collection into pgvector."""
+        if not self._chroma_enabled:
+            return 0
+        if batch_size < 1:
+            raise ValueError("batch_size 必须大于 0")
+        result = self._get_chroma().get(include=["documents", "metadatas"])
+        ids = result.get("ids", [])
+        documents = result.get("documents", [])
+        metadatas = result.get("metadatas", [])
+        total = 0
+        for offset in range(0, len(ids), batch_size):
+            end = offset + batch_size
+            self.add_texts(documents[offset:end], metadatas=metadatas[offset:end], ids=ids[offset:end])
+            total += len(ids[offset:end])
+        return total
 
     def get_retriever(self):
         """返回向量库检索器，方便加入 Chain"""
@@ -254,6 +291,26 @@ class VectorWardrobeService:
                 self._record_pgvector_failure("delete", [(item_id, "") for item_id in item_ids], error)
                 self._handle_pgvector_error(error)
 
+    def backfill_from_chroma(self, *, batch_size: int = 64) -> int:
+        """Idempotently copy the current wardrobe Chroma collection into pgvector."""
+        if self.vector_store is None:
+            return 0
+        if batch_size < 1:
+            raise ValueError("batch_size 必须大于 0")
+        result = self._get_chroma().get(include=["documents", "metadatas"])
+        ids = result.get("ids", [])
+        documents = result.get("documents", [])
+        metadatas = result.get("metadatas", [])
+        total = 0
+        for offset in range(0, len(ids), batch_size):
+            end = offset + batch_size
+            batch = []
+            for chroma_id, content, metadata in zip(ids[offset:end], documents[offset:end], metadatas[offset:end]):
+                batch.append((str((metadata or {}).get("item_id") or chroma_id), content))
+            self._pgvector_write(batch)
+            total += len(batch)
+        return total
+
     def search(self, query: str, k: int = 15) -> list[str]:
         """语义检索最相关的 Top-K 单品描述文本，并打印检索耗时。"""
         start_time = time.time()
@@ -265,6 +322,7 @@ class VectorWardrobeService:
                 results = self._get_pgvector_store().search(
                     embed_query(query), source_kind="wardrobe", limit=k
                 )
+                print(json.dumps({"event": "pgvector_search", "source_kind": "wardrobe", "count": len(results), "latency_ms": round((time.time() - start_time) * 1000, 2)}, ensure_ascii=False), flush=True)
                 return [result["content"] for result in results]
             except Exception as error:
                 self._handle_pgvector_error(error)
@@ -272,12 +330,17 @@ class VectorWardrobeService:
         if config.VECTOR_SHADOW_QUERY:
             embed_query = getattr(self.embedding, "embed_query", None)
             if callable(embed_query):
+                shadow_start = time.time()
                 try:
-                    self._get_pgvector_store().search(
+                    shadow = self._get_pgvector_store().search(
                         embed_query(query), source_kind="wardrobe", limit=k
                     )
+                    primary = {doc.page_content for doc in docs}
+                    shadow_set = {item["content"] for item in shadow}
+                    overlap = len(primary & shadow_set) / max(1, len(primary | shadow_set))
+                    print(json.dumps({"event": "vector_shadow", "source_kind": "wardrobe", "primary_count": len(primary), "shadow_count": len(shadow_set), "overlap": round(overlap, 4), "primary_latency_ms": round((shadow_start - start_time) * 1000, 2), "shadow_latency_ms": round((time.time() - shadow_start) * 1000, 2)}, ensure_ascii=False), flush=True)
                 except Exception as error:
-                    self._handle_pgvector_error(error)
+                    print(json.dumps({"event": "vector_shadow_error", "source_kind": "wardrobe", "error": str(error)[:500]}, ensure_ascii=False), flush=True)
         print(f"[PERF] VectorWardrobeService.search took {time.time() - start_time:.3f}s", flush=True)
         return [doc.page_content for doc in docs]
 

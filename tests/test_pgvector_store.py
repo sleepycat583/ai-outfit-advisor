@@ -18,6 +18,9 @@ class FakeCursor:
     def fetchall(self):
         return self.rows
 
+    def fetchone(self):
+        return self.rows[0] if self.rows else (0,)
+
     def __enter__(self):
         return self
 
@@ -149,6 +152,55 @@ def test_list_documents_is_user_scoped():
     store = PgVectorStore(lambda: conn, embedding=object(), user_id="user-a")
     assert store.list_documents(source_kind="knowledge") == [{"id": "doc-a", "content": "内容", "metadata": {"source": "a"}}]
     assert conn.cursor_obj.calls[-1][1] == ("knowledge", "user-a")
+
+
+def test_outbox_event_state_machine_uses_lease_and_latest_operation():
+    conn = FakeConnection()
+    store = PgVectorStore(lambda: conn, embedding=object(), user_id="user-a")
+
+    store.claim_sync_events(limit=2, lease_seconds=30)
+    claim_query, claim_params = conn.cursor_obj.calls[-1]
+    assert "FOR UPDATE SKIP LOCKED" in claim_query
+    assert claim_params == (2, 30)
+
+    store.complete_sync_event(7, "lease-token")
+    complete_query, complete_params = conn.cursor_obj.calls[-1]
+    assert "status = 'succeeded'" in complete_query
+    assert complete_params == (7, "lease-token")
+
+    store.fail_sync_event(7, "lease-token", RuntimeError("temporary"), max_attempts=3)
+    fail_query, fail_params = conn.cursor_obj.calls[-1]
+    assert "status = CASE" in fail_query
+    assert fail_params == (3, "temporary", 7, "lease-token")
+
+
+def test_count_is_user_scoped():
+    conn = FakeConnection()
+    conn.cursor_obj.rows = [(4,)]
+    store = PgVectorStore(lambda: conn, embedding=object(), user_id="user-a")
+    assert store.count(source_kind="knowledge") == 4
+    assert conn.cursor_obj.calls[-1][1] == ("knowledge", "user-a")
+
+
+def test_outbox_worker_acknowledges_only_after_target_write():
+    from vector_sync_worker import process_event
+
+    class Store:
+        embedding = object()
+
+        def upsert(self, documents, *, source_kind):
+            assert documents[0].content == "内容"
+            assert source_kind == "knowledge"
+
+        def complete_sync_event(self, event_id, lease_token):
+            assert (event_id, lease_token) == (7, "lease")
+            return True
+
+        def fail_sync_event(self, *args, **kwargs):
+            raise AssertionError("success path must not fail")
+
+    event = {"id": 7, "lease_token": "lease", "source_kind": "knowledge", "operation": "upsert", "doc_id": "doc", "payload": {"content": "内容", "metadata": {}, "embedding": [0.1] * VECTOR_DIMENSION}}
+    assert process_event(Store(), event) is True
 
 
 def test_wardrobe_dual_write_keeps_chroma_primary(monkeypatch, tmp_path):
