@@ -62,11 +62,20 @@ VECTOR_BACKEND = os.getenv("VECTOR_BACKEND", "chroma").strip().lower()
 # The default is intentionally conservative for the existing legacy backend.
 MEMORY_DUAL_WRITE = _env_bool("MEMORY_DUAL_WRITE", default=MEMORY_BACKEND == "native")
 MEMORY_NATIVE_FALLBACK = _env_bool("MEMORY_NATIVE_FALLBACK", default=True)
-MEMORY_PRIVATE_SCHEMA = os.getenv("MEMORY_PRIVATE_SCHEMA", "app_private").strip() or "app_private"
+# Memory objects are deployed in one private schema.  Keeping this fixed avoids
+# the Python producer and the Edge worker silently targeting different schemas.
+_configured_memory_schema = os.getenv("MEMORY_PRIVATE_SCHEMA", "app_private").strip() or "app_private"
+if _configured_memory_schema != "app_private":
+    raise ValueError("MEMORY_PRIVATE_SCHEMA 仅支持 app_private")
+MEMORY_PRIVATE_SCHEMA = "app_private"
 LONG_TERM_MEMORY_ENABLED = _env_bool("LONG_TERM_MEMORY_ENABLED", default=False)
 MEMORY_ASYNC_EXTRACTION_ENABLED = _env_bool("MEMORY_ASYNC_EXTRACTION_ENABLED", default=False)
 MEMORY_JOB_QUEUE_NAME = os.getenv("MEMORY_JOB_QUEUE_NAME", "memory-extraction").strip().lower()
+if MEMORY_JOB_QUEUE_NAME != "memory-extraction":
+    raise ValueError("MEMORY_JOB_QUEUE_NAME 仅支持 memory-extraction")
 MEMORY_JOB_MAX_ATTEMPTS = int(os.getenv("MEMORY_JOB_MAX_ATTEMPTS", "5"))
+if MEMORY_JOB_MAX_ATTEMPTS < 1:
+    raise ValueError("MEMORY_JOB_MAX_ATTEMPTS 必须大于 0")
 
 # 摘要约束检测关键词配置
 # 用于识别用户消息中的明确约束,确保这些约束在摘要压缩时不被丢弃

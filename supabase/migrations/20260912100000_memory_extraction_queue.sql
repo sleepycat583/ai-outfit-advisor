@@ -40,8 +40,20 @@ CREATE TABLE IF NOT EXISTS app_private.memory_dead_letters (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Queue messages without a trustworthy receipt cannot reference the receipt
+-- backed dead-letter table. Keep them separately for operational diagnosis.
+CREATE TABLE IF NOT EXISTS app_private.memory_poison_dead_letters (
+    msg_id BIGINT PRIMARY KEY,
+    error TEXT NOT NULL,
+    attempts INTEGER NOT NULL CHECK (attempts > 0),
+    payload JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 REVOKE ALL ON app_private.memory_job_receipts FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON app_private.memory_dead_letters FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON app_private.memory_poison_dead_letters FROM PUBLIC, anon, authenticated;
 
 DO $$
 BEGIN

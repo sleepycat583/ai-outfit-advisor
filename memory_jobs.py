@@ -19,6 +19,8 @@ from supabase_config import get_database_url
 
 
 _QUEUE_RE = re.compile(r"^[a-z0-9_-]+$")
+_PRIVATE_SCHEMA = "app_private"
+_QUEUE_NAME = "memory-extraction"
 
 
 @dataclass(frozen=True)
@@ -103,8 +105,12 @@ class MemoryJobRepository:
         retry_policy: RetryPolicy | None = None,
     ):
         self.schema = _validate_schema(schema)
+        if self.schema != _PRIVATE_SCHEMA:
+            raise ValueError("异步记忆队列仅支持 app_private schema")
         if not _QUEUE_RE.fullmatch(queue_name):
             raise ValueError("queue_name 必须是小写 pgmq 标识符")
+        if queue_name != _QUEUE_NAME:
+            raise ValueError("异步记忆队列仅支持 memory-extraction")
         self.queue_name = queue_name
         if retry_policy is None:
             try:

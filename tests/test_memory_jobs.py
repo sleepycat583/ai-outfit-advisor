@@ -109,6 +109,13 @@ def test_queue_repository_reads_configured_max_attempts(monkeypatch):
     assert repository.retry_policy.max_attempts == 2
 
 
+def test_queue_repository_rejects_unmanaged_schema_or_queue():
+    with pytest.raises(ValueError, match="app_private"):
+        MemoryJobRepository(schema="another_private_schema")
+    with pytest.raises(ValueError, match="memory-extraction"):
+        MemoryJobRepository(queue_name="another-queue")
+
+
 def test_retry_policy_exposes_delay_for_queue_visibility_timeout():
     assert RetryPolicy(base_delay_seconds=7).delay_seconds(3) == 28
 
@@ -123,6 +130,7 @@ def test_queue_migration_creates_private_receipts_queue_and_dead_letters():
     assert "CREATE EXTENSION IF NOT EXISTS pgmq" in migration
     assert "memory_job_receipts" in migration
     assert "memory_dead_letters" in migration
+    assert "memory_poison_dead_letters" in migration
     assert "pgmq.create('memory-extraction')" in migration
     assert "REVOKE USAGE ON SCHEMA pgmq" in migration
     assert "REVOKE ALL ON app_private.memory_job_receipts" in migration
@@ -145,5 +153,8 @@ def test_worker_and_cron_are_server_side_only():
     assert "MEMORY_WORKER_SERVICE_KEY" in worker
     assert "DASHSCOPE_API_KEY" in worker
     assert "memory_job_receipts" in worker
+    assert "archivePoisonMessage" in worker
+    assert "claimed.length === 0" in worker
+    assert "MEMORY_JOB_QUEUE_NAME must be memory-extraction" in worker
     assert "vault.decrypted_secrets" in cron
     assert "cron.schedule" in cron

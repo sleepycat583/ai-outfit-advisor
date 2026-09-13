@@ -4,7 +4,18 @@ const queueName = Deno.env.get("MEMORY_JOB_QUEUE_NAME") ?? "memory-extraction";
 const databaseUrl = Deno.env.get("SUPABASE_DB_URL");
 const dashscopeKey = Deno.env.get("DASHSCOPE_API_KEY");
 const workerKey = Deno.env.get("MEMORY_WORKER_SERVICE_KEY");
-const maxAttempts = Number(Deno.env.get("MEMORY_JOB_MAX_ATTEMPTS") ?? "5");
+
+if (queueName !== "memory-extraction") {
+  throw new Error("MEMORY_JOB_QUEUE_NAME must be memory-extraction");
+}
+
+function positiveInteger(value: string | undefined, fallback: number): number {
+  if (value === undefined || !/^\d+$/.test(value)) return fallback;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const maxAttempts = positiveInteger(Deno.env.get("MEMORY_JOB_MAX_ATTEMPTS"), 5);
 
 type QueueMessage = {
   msg_id: number;
@@ -15,7 +26,7 @@ type QueueMessage = {
 type Candidate = {
   key: string;
   content: string;
-  confidence?: number;
+  confidence?: number | null;
 };
 
 function authorized(request: Request): boolean {
@@ -24,6 +35,26 @@ function authorized(request: Request): boolean {
 
 function parseMessage(message: QueueMessage["message"]): Record<string, unknown> {
   return typeof message === "string" ? JSON.parse(message) : message;
+}
+
+async function archivePoisonMessage(
+  sql: ReturnType<typeof postgres>,
+  message: QueueMessage,
+  error: string,
+  attempt: number,
+): Promise<void> {
+  await sql.begin(async (transaction) => {
+    await transaction`
+      INSERT INTO app_private.memory_poison_dead_letters (msg_id, error, attempts, payload)
+      VALUES (${message.msg_id}, ${error.slice(0, 2000)}, ${Math.max(1, attempt)}, ${JSON.stringify(message.message)}::jsonb)
+      ON CONFLICT (msg_id) DO UPDATE SET
+        error = EXCLUDED.error,
+        attempts = EXCLUDED.attempts,
+        payload = EXCLUDED.payload,
+        updated_at = now()
+    `;
+    await transaction`SELECT pgmq.archive(${queueName}, ${message.msg_id})`;
+  });
 }
 
 async function sha256(value: string): Promise<string> {
@@ -87,17 +118,19 @@ async function recordFailure(
   error: unknown,
   leaseToken = "",
   expected?: { userId: string; conversationId: string; dedupeKey: string },
+  malformed = false,
 ): Promise<void> {
   const messageText = String(error).slice(0, 2000);
   const attempt = Number(message.read_ct ?? 1);
-  const dead = attempt >= maxAttempts;
+  const dead = malformed || attempt >= maxAttempts;
   await sql.begin(async (transaction) => {
     if (jobId) {
-      const succeeded = await transaction`
-        SELECT status FROM app_private.memory_job_receipts
+      const receipt = await transaction`
+        SELECT status, lease_token, user_id, conversation_id, dedupe_key
+        FROM app_private.memory_job_receipts
         WHERE job_id = ${jobId}
       `;
-      if (succeeded[0]?.status === "succeeded") {
+      if (receipt[0]?.status === "succeeded") {
         // Crash after the success transition must be recoverable: deleting an
         // already-deleted pgmq message is intentionally idempotent.
         await transaction`SELECT pgmq.delete(${queueName}, ${message.msg_id})`;
@@ -108,11 +141,31 @@ async function recordFailure(
         : expected
           ? transaction`AND user_id = ${expected.userId} AND conversation_id = ${expected.conversationId} AND dedupe_key = ${expected.dedupeKey} AND status <> 'succeeded'`
           : transaction`AND status <> 'succeeded'`;
-      await transaction`
+      const updated = await transaction`
         UPDATE app_private.memory_job_receipts
         SET status = ${dead ? "dead_letter" : "retrying"}, last_error = ${messageText}, attempts = ${attempt}, lease_token = NULL, lease_until = NULL, updated_at = now()
         WHERE job_id = ${jobId} ${tokenClause}
       `;
+      // A stale worker must not change queue visibility or dead-letter a
+      // message after another worker has acquired the lease.
+      if (updated.count !== 1) {
+        const mismatch = !receipt[0]
+          || Boolean(expected && (
+            receipt[0].user_id !== expected.userId
+            || receipt[0].conversation_id !== expected.conversationId
+            || receipt[0].dedupe_key !== expected.dedupeKey
+          ));
+        if (mismatch) {
+          await transaction`
+            INSERT INTO app_private.memory_poison_dead_letters (msg_id, error, attempts, payload)
+            VALUES (${message.msg_id}, ${messageText}, ${Math.max(1, attempt)}, ${JSON.stringify(message.message)}::jsonb)
+            ON CONFLICT (msg_id) DO UPDATE SET error = EXCLUDED.error, attempts = EXCLUDED.attempts,
+              payload = EXCLUDED.payload, updated_at = now()
+          `;
+          await transaction`SELECT pgmq.archive(${queueName}, ${message.msg_id})`;
+        }
+        return;
+      }
     }
     if (dead) {
       await transaction`SELECT pgmq.archive(${queueName}, ${message.msg_id})`;
@@ -121,7 +174,7 @@ async function recordFailure(
           INSERT INTO app_private.memory_dead_letters (job_id, msg_id, error, attempts)
           VALUES (${jobId}, ${message.msg_id}, ${messageText}, ${attempt})
           ON CONFLICT (job_id) DO UPDATE SET error = EXCLUDED.error, attempts = EXCLUDED.attempts, updated_at = now()
-        `;
+          `;
       }
     } else {
       const delay = Math.min(900, 15 * (2 ** Math.max(0, attempt - 1)));
@@ -136,6 +189,7 @@ async function processMessage(sql: ReturnType<typeof postgres>, message: QueueMe
   let leaseToken = "";
   let expected = { userId: "", conversationId: "", dedupeKey: "" };
 
+  let malformed = false;
   try {
     const job = parseMessage(message.message);
     jobId = String(job.job_id ?? "");
@@ -143,7 +197,10 @@ async function processMessage(sql: ReturnType<typeof postgres>, message: QueueMe
     const userId = String(job.user_id ?? "");
     const conversationId = String(job.conversation_id ?? "");
     expected = { userId, conversationId, dedupeKey };
-    if (!jobId || !dedupeKey || !userId || !conversationId) throw new Error("invalid memory extraction payload");
+    if (!jobId || !dedupeKey || !userId || !conversationId) {
+      malformed = true;
+      throw new Error("invalid memory extraction payload");
+    }
     leaseToken = crypto.randomUUID();
 
     const claimed = await sql.begin(async (transaction) => transaction`
@@ -158,32 +215,64 @@ async function processMessage(sql: ReturnType<typeof postgres>, message: QueueMe
         AND (status <> 'processing' OR lease_until IS NULL OR lease_until < now())
       RETURNING job_id, lease_token
     `);
-    if (claimed.length === 0) return;
+    if (claimed.length === 0) {
+      const receipt = await sql`
+        SELECT status, user_id, conversation_id, dedupe_key
+        FROM app_private.memory_job_receipts
+        WHERE job_id = ${jobId}
+      `;
+      const matchesReceipt = Boolean(receipt[0]
+        && receipt[0].user_id === userId
+        && receipt[0].conversation_id === conversationId
+        && receipt[0].dedupe_key === dedupeKey);
+      if (!matchesReceipt) {
+        await archivePoisonMessage(sql, message, "queue payload does not match a receipt", attempt);
+      } else if (receipt[0].status === "succeeded") {
+        await sql`SELECT pgmq.delete(${queueName}, ${message.msg_id})`;
+      } else if (receipt[0].status === "dead_letter") {
+        await sql`SELECT pgmq.archive(${queueName}, ${message.msg_id})`;
+      }
+      return;
+    }
 
     const candidates = await extractCandidates(job);
-    for (const candidate of candidates) {
-      const itemKey = `auto:${await sha256(`${dedupeKey}\x1f${candidate.key}`)}`;
-      await sql`
-        INSERT INTO app_private.memory_items (namespace, key, value)
-        VALUES (${sql.array([`user:${userId}`, "memory"])}, ${itemKey}, ${sql.json({
-          content: candidate.content,
-          source: "async_extraction",
-          confidence: candidate.confidence ?? null,
-          dedupe_key: dedupeKey,
-        })})
-        ON CONFLICT (namespace, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+    const completed = await sql.begin(async (transaction) => {
+      const lease = await transaction`
+        UPDATE app_private.memory_job_receipts
+        SET lease_until = now() + interval '180 seconds', updated_at = now()
+        WHERE job_id = ${jobId} AND lease_token = ${leaseToken} AND status = 'processing'
+          AND lease_until IS NOT NULL AND lease_until > now()
+        RETURNING job_id
       `;
-    }
-    const completed = await sql`
-      UPDATE app_private.memory_job_receipts
-      SET status = 'succeeded', completed_at = now(), lease_token = NULL, lease_until = NULL, updated_at = now(), last_error = NULL
-      WHERE job_id = ${jobId} AND lease_token = ${leaseToken} AND status = 'processing'
-      RETURNING job_id
-    `;
+      if (lease.length === 0) return [];
+      for (const candidate of candidates) {
+        const itemKey = `auto:${await sha256(`${dedupeKey}\x1f${candidate.key}`)}`;
+        await transaction`
+          INSERT INTO app_private.memory_items (namespace, key, value)
+          VALUES (${transaction.array([`user:${userId}`, "memory"])}, ${itemKey}, ${transaction.json({
+            content: candidate.content,
+            source: "async_extraction",
+            confidence: candidate.confidence ?? null,
+            dedupe_key: dedupeKey,
+          })})
+          ON CONFLICT (namespace, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+        `;
+      }
+      return transaction`
+        UPDATE app_private.memory_job_receipts
+        SET status = 'succeeded', completed_at = now(), lease_token = NULL, lease_until = NULL, updated_at = now(), last_error = NULL
+        WHERE job_id = ${jobId} AND lease_token = ${leaseToken} AND status = 'processing'
+        RETURNING job_id
+      `;
+    });
     if (completed.length === 0) return;
     await sql`SELECT pgmq.delete(${queueName}, ${message.msg_id})`;
   } catch (error) {
-    await recordFailure(sql, message, jobId, error, leaseToken, expected);
+    if (malformed && !jobId) {
+      await archivePoisonMessage(sql, message, String(error), attempt);
+    } else {
+      await recordFailure(sql, message, jobId, error, leaseToken, expected, malformed);
+    }
   }
 }
 
