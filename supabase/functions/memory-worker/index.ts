@@ -34,7 +34,11 @@ function authorized(request: Request): boolean {
 }
 
 function parseMessage(message: QueueMessage["message"]): Record<string, unknown> {
-  return typeof message === "string" ? JSON.parse(message) : message;
+  const parsed = typeof message === "string" ? JSON.parse(message) : message;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("invalid memory extraction payload: expected object");
+  }
+  return parsed as Record<string, unknown>;
 }
 
 async function archivePoisonMessage(
@@ -46,7 +50,7 @@ async function archivePoisonMessage(
   await sql.begin(async (transaction) => {
     await transaction`
       INSERT INTO app_private.memory_poison_dead_letters (msg_id, error, attempts, payload)
-      VALUES (${message.msg_id}, ${error.slice(0, 2000)}, ${Math.max(1, attempt)}, ${JSON.stringify(message.message)}::jsonb)
+      VALUES (${message.msg_id}, ${error.slice(0, 2000)}, ${Math.max(1, attempt)}, ${JSON.stringify(message.message ?? null)}::jsonb)
       ON CONFLICT (msg_id) DO UPDATE SET
         error = EXCLUDED.error,
         attempts = EXCLUDED.attempts,
@@ -158,7 +162,7 @@ async function recordFailure(
         if (mismatch) {
           await transaction`
             INSERT INTO app_private.memory_poison_dead_letters (msg_id, error, attempts, payload)
-            VALUES (${message.msg_id}, ${messageText}, ${Math.max(1, attempt)}, ${JSON.stringify(message.message)}::jsonb)
+            VALUES (${message.msg_id}, ${messageText}, ${Math.max(1, attempt)}, ${JSON.stringify(message.message ?? null)}::jsonb)
             ON CONFLICT (msg_id) DO UPDATE SET error = EXCLUDED.error, attempts = EXCLUDED.attempts,
               payload = EXCLUDED.payload, updated_at = now()
           `;
@@ -191,7 +195,13 @@ async function processMessage(sql: ReturnType<typeof postgres>, message: QueueMe
 
   let malformed = false;
   try {
-    const job = parseMessage(message.message);
+    let job: Record<string, unknown>;
+    try {
+      job = parseMessage(message.message);
+    } catch (error) {
+      malformed = true;
+      throw error;
+    }
     jobId = String(job.job_id ?? "");
     const dedupeKey = String(job.dedupe_key ?? "");
     const userId = String(job.user_id ?? "");

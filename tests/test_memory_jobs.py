@@ -156,5 +156,9 @@ def test_worker_and_cron_are_server_side_only():
     assert "archivePoisonMessage" in worker
     assert "claimed.length === 0" in worker
     assert "MEMORY_JOB_QUEUE_NAME must be memory-extraction" in worker
+    assert "expected object" in worker
+    assert "malformed = true" in worker
     assert "vault.decrypted_secrets" in cron
+    assert "memory worker Vault secrets are required" in cron
+    assert "RAISE EXCEPTION" in cron
     assert "cron.schedule" in cron

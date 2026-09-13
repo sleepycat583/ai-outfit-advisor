@@ -9,7 +9,21 @@ CREATE EXTENSION IF NOT EXISTS pg_net;
 DO $$
 DECLARE
     existing_job_id BIGINT;
+    worker_url TEXT;
+    worker_service_key TEXT;
 BEGIN
+    SELECT decrypted_secret INTO worker_url
+    FROM vault.decrypted_secrets
+    WHERE name = 'memory_worker_url';
+    SELECT decrypted_secret INTO worker_service_key
+    FROM vault.decrypted_secrets
+    WHERE name = 'memory_worker_service_key';
+
+    IF NULLIF(BTRIM(worker_url), '') IS NULL
+       OR NULLIF(BTRIM(worker_service_key), '') IS NULL THEN
+        RAISE EXCEPTION 'memory worker Vault secrets are required before enabling cron';
+    END IF;
+
     SELECT jobid INTO existing_job_id
     FROM cron.job
     WHERE jobname = 'memory-extraction-worker';
