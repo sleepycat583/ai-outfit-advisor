@@ -223,6 +223,7 @@ def test_wardrobe_dual_write_keeps_chroma_primary(monkeypatch, tmp_path):
 
         def upsert(self, documents, *, source_kind):
             self.upserts.append((documents, source_kind))
+            return len(documents)
 
     monkeypatch.setattr(module, "Chroma", FakeChroma)
     monkeypatch.setattr(module.config, "persist_directory", str(tmp_path))
@@ -314,6 +315,7 @@ def test_pgvector_backend_with_dual_write_keeps_chroma_rollback_copy(monkeypatch
     class PgStore:
         def upsert(self, documents, *, source_kind):
             assert source_kind == "wardrobe"
+            return len(documents)
 
     monkeypatch.setattr(module, "Chroma", FakeChroma)
     monkeypatch.setattr(module.config, "persist_directory", str(tmp_path))
@@ -387,3 +389,184 @@ def test_knowledge_service_supports_pgvector_read_path_without_chroma(monkeypatc
 
     docs = service.search("洗涤", k=2)
     assert docs[0].page_content == "洗涤知识"
+
+
+def test_knowledge_backfill_writes_pgvector_without_readding_chroma(monkeypatch, tmp_path):
+    import vector_store_service as module
+
+    class FakeChroma:
+        def __init__(self, **kwargs):
+            self.add_calls = 0
+
+        def get(self, **kwargs):
+            return {
+                "ids": ["legacy-1", "legacy-2"],
+                "documents": ["黑色外套", "白色衬衫"],
+                "metadatas": [{"source": "衣物"}, {"source": "衣物"}],
+            }
+
+        def add_texts(self, **kwargs):
+            self.add_calls += 1
+            raise AssertionError("backfill must not re-add existing Chroma ids")
+
+    class Embedding:
+        def embed_documents(self, texts):
+            return [[0.1] * VECTOR_DIMENSION for _ in texts]
+
+    class PgStore:
+        def __init__(self):
+            self.calls = []
+
+        def upsert(self, documents, *, source_kind):
+            self.calls.append((documents, source_kind))
+            return len(documents)
+
+    monkeypatch.setattr(module, "Chroma", FakeChroma)
+    monkeypatch.setattr(module.config, "persist_directory", str(tmp_path))
+    monkeypatch.setattr(module.config, "VECTOR_BACKEND", "chroma")
+    monkeypatch.setattr(module.config, "VECTOR_DUAL_WRITE", True)
+    service = module.VectorStoreService(Embedding(), user_id="user-a")
+    pg_store = PgStore()
+    service._pgvector_store = pg_store
+
+    assert service.backfill_from_chroma(batch_size=1) == 2
+    assert len(pg_store.calls) == 2
+    assert [call[0][0].doc_id for call in pg_store.calls] == ["legacy-1", "legacy-2"]
+    assert service.vector_store.add_calls == 0
+
+
+def test_knowledge_backfill_reports_failed_dual_write_and_strict_mode(monkeypatch, tmp_path):
+    import vector_store_service as module
+
+    class FakeChroma:
+        def __init__(self, **kwargs):
+            pass
+
+        def get(self, **kwargs):
+            return {"ids": ["legacy-1"], "documents": ["黑色外套"], "metadatas": [{}]}
+
+    class Embedding:
+        def embed_documents(self, texts):
+            return [[0.1] * VECTOR_DIMENSION for _ in texts]
+
+    class PgStore:
+        def __init__(self):
+            self.failures = []
+
+        def upsert(self, documents, *, source_kind):
+            raise RuntimeError("pg unavailable")
+
+        def record_sync_failure(self, **kwargs):
+            self.failures.append(kwargs)
+
+    monkeypatch.setattr(module, "Chroma", FakeChroma)
+    monkeypatch.setattr(module.config, "persist_directory", str(tmp_path))
+    monkeypatch.setattr(module.config, "VECTOR_BACKEND", "chroma")
+    monkeypatch.setattr(module.config, "VECTOR_DUAL_WRITE", True)
+    service = module.VectorStoreService(Embedding(), user_id="user-a")
+    pg_store = PgStore()
+    service._pgvector_store = pg_store
+
+    assert service.backfill_from_chroma() == 0
+    assert len(pg_store.failures) == 1
+    with pytest.raises(RuntimeError, match="回填批次失败"):
+        service.backfill_from_chroma(strict=True)
+
+
+def test_wardrobe_backfill_reports_actual_writes_and_canonical_item_ids(monkeypatch, tmp_path):
+    import vector_store_service as module
+
+    class FakeChroma:
+        def __init__(self, **kwargs):
+            pass
+
+        def get(self, **kwargs):
+            return {
+                "ids": ["legacy-uuid"],
+                "documents": ["黑色外套"],
+                "metadatas": [{"item_id": "item-1"}],
+            }
+
+    class Embedding:
+        def embed_documents(self, texts):
+            return [[0.1] * VECTOR_DIMENSION for _ in texts]
+
+    class PgStore:
+        def __init__(self):
+            self.calls = []
+
+        def upsert(self, documents, *, source_kind):
+            self.calls.append((documents, source_kind))
+            return len(documents)
+
+    monkeypatch.setattr(module, "Chroma", FakeChroma)
+    monkeypatch.setattr(module.config, "persist_directory", str(tmp_path))
+    monkeypatch.setattr(module.config, "VECTOR_BACKEND", "chroma")
+    monkeypatch.setattr(module.config, "VECTOR_DUAL_WRITE", True)
+    service = module.VectorWardrobeService(Embedding(), user_id="user-a")
+    pg_store = PgStore()
+    service._pgvector_store = pg_store
+
+    assert service.backfill_from_chroma(strict=True) == 1
+    assert pg_store.calls[0][0][0].doc_id == "item-1"
+
+
+def test_wardrobe_backfill_rejects_partial_upsert_and_records_outbox(monkeypatch, tmp_path):
+    import vector_store_service as module
+
+    class FakeChroma:
+        def __init__(self, **kwargs):
+            pass
+
+        def get(self, **kwargs):
+            return {"ids": ["item-1"], "documents": ["黑色外套"], "metadatas": [{"item_id": "item-1"}]}
+
+    class Embedding:
+        def embed_documents(self, texts):
+            return [[0.1] * VECTOR_DIMENSION for _ in texts]
+
+    class PgStore:
+        def __init__(self):
+            self.failures = []
+
+        def upsert(self, documents, *, source_kind):
+            return 0
+
+        def record_sync_failure(self, **kwargs):
+            self.failures.append(kwargs)
+
+    monkeypatch.setattr(module, "Chroma", FakeChroma)
+    monkeypatch.setattr(module.config, "persist_directory", str(tmp_path))
+    monkeypatch.setattr(module.config, "VECTOR_BACKEND", "chroma")
+    monkeypatch.setattr(module.config, "VECTOR_DUAL_WRITE", True)
+    service = module.VectorWardrobeService(Embedding(), user_id="user-a")
+    pg_store = PgStore()
+    service._pgvector_store = pg_store
+
+    with pytest.raises(RuntimeError, match="upsert 数量不完整"):
+        service.backfill_from_chroma(strict=True)
+    assert len(pg_store.failures) == 1
+
+
+def test_wardrobe_backfill_rejects_misaligned_chroma_snapshot(monkeypatch, tmp_path):
+    import vector_store_service as module
+
+    class FakeChroma:
+        def __init__(self, **kwargs):
+            pass
+
+        def get(self, **kwargs):
+            return {"ids": ["item-1", "item-2"], "documents": ["黑色外套"], "metadatas": [{}]}
+
+    class Embedding:
+        def embed_documents(self, texts):
+            return [[0.1] * VECTOR_DIMENSION for _ in texts]
+
+    monkeypatch.setattr(module, "Chroma", FakeChroma)
+    monkeypatch.setattr(module.config, "persist_directory", str(tmp_path))
+    monkeypatch.setattr(module.config, "VECTOR_BACKEND", "chroma")
+    monkeypatch.setattr(module.config, "VECTOR_DUAL_WRITE", True)
+    service = module.VectorWardrobeService(Embedding(), user_id="user-a")
+
+    with pytest.raises(RuntimeError, match="快照长度不一致"):
+        service.backfill_from_chroma(strict=True)

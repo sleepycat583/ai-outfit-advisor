@@ -183,6 +183,11 @@ VECTOR_SHADOW_QUERY=true    # 读取仍用 Chroma，同时记录两端 Top-K ove
 
 确认真实 Supabase 隔离 schema 中回填记录数、用户隔离、召回 overlap、P50/P95 和 outbox 积压均达标后，才切换 `VECTOR_BACKEND=pgvector`。保留 `VECTOR_DUAL_WRITE=true` 可继续保留 Chroma 回滚副本；切回时将 `VECTOR_BACKEND` 改回 `chroma`。当前仓库未包含真实 Supabase 凭据，迁移 dry-run、回填和性能门槛必须在部署环境执行。
 
+回填使用服务端命令 `python scripts/backfill_pgvector.py --user-id <USER_ID> --source both`。
+命令以 Chroma 为只读源、按批次只写 pgvector；`written` 仅统计实际成功的 upsert，任何批次失败都会进入
+`vector_sync_outbox` 并以非零状态终止。完成前会逐个比较源/目标 ID 集合（衣橱旧数据使用
+`metadata.item_id` 作为 canonical ID），发现缺失或多余记录都必须先处理，不能只用总数判断回填完成。
+
 
 知识库上传者归属迁移：如果项目已部署过旧版本，请先在 Supabase SQL Editor 中执行
 `migrations/001_kb_uploader_attribution.sql`，再部署新代码。种子知识显示为“小曹（系统预置）”，

@@ -33,20 +33,37 @@ def main() -> int:
     report: dict[str, object] = {"user_id": args.user_id, "sources": {}}
     if args.source in {"knowledge", "both"}:
         service = VectorStoreService(embedding=embedding, user_id=args.user_id)
-        source_count = len(service._get_chroma().get(include=["documents"]).get("ids", []))
-        written = service.backfill_from_chroma(batch_size=args.batch_size)
-        target = service._get_pgvector_store().count(source_kind="knowledge")
-        report["sources"]["knowledge"] = {"source_count": source_count, "written": written, "target_count": target}
-        if target < source_count:
-            raise RuntimeError(f"knowledge 回填不完整: source={source_count}, target={target}")
+        source_ids = service._get_chroma().get(include=["documents"]).get("ids", [])
+        written = service.backfill_from_chroma(batch_size=args.batch_size, strict=True)
+        target_documents = service._get_pgvector_store().list_documents(source_kind="knowledge")
+        target_ids = {document["id"] for document in target_documents}
+        missing_ids = sorted(set(source_ids) - target_ids)
+        extra_ids = sorted(target_ids - set(source_ids))
+        report["sources"]["knowledge"] = {"source_count": len(source_ids), "written": written, "target_count": len(target_documents), "missing_ids": missing_ids, "extra_ids": extra_ids}
+        if missing_ids or extra_ids:
+            raise RuntimeError(f"knowledge 回填集合不一致: missing={len(missing_ids)}, extra={len(extra_ids)}")
     if args.source in {"wardrobe", "both"}:
         service = VectorWardrobeService(embedding=embedding, user_id=args.user_id)
-        source_count = len(service._get_chroma().get(include=["documents"]).get("ids", []))
-        written = service.backfill_from_chroma(batch_size=args.batch_size)
-        target = service._get_pgvector_store().count(source_kind="wardrobe")
-        report["sources"]["wardrobe"] = {"source_count": source_count, "written": written, "target_count": target}
-        if target < source_count:
-            raise RuntimeError(f"wardrobe 回填不完整: source={source_count}, target={target}")
+        source_result = service._get_chroma().get(include=["documents", "metadatas"])
+        source_chroma_ids = source_result.get("ids", [])
+        source_metadatas = source_result.get("metadatas") or [{} for _ in source_chroma_ids]
+        if len(source_chroma_ids) != len(source_metadatas):
+            raise RuntimeError(
+                "wardrobe Chroma 源快照长度不一致: "
+                f"ids={len(source_chroma_ids)}, metadatas={len(source_metadatas)}"
+            )
+        source_ids = [
+            str((metadata or {}).get("item_id") or chroma_id)
+            for chroma_id, metadata in zip(source_chroma_ids, source_metadatas)
+        ]
+        written = service.backfill_from_chroma(batch_size=args.batch_size, strict=True)
+        target_documents = service._get_pgvector_store().list_documents(source_kind="wardrobe")
+        target_ids = {document["id"] for document in target_documents}
+        missing_ids = sorted(set(source_ids) - target_ids)
+        extra_ids = sorted(target_ids - set(source_ids))
+        report["sources"]["wardrobe"] = {"source_count": len(source_ids), "written": written, "target_count": len(target_documents), "missing_ids": missing_ids, "extra_ids": extra_ids}
+        if missing_ids or extra_ids:
+            raise RuntimeError(f"wardrobe 回填集合不一致: missing={len(missing_ids)}, extra={len(extra_ids)}")
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     return 0
 

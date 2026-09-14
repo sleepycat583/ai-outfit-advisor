@@ -71,16 +71,33 @@ class VectorStoreService(object):
         if self._chroma_enabled:
             self._get_chroma().add_texts(texts=texts, metadatas=metadatas, ids=ids)
         if config.VECTOR_BACKEND == "pgvector" or config.VECTOR_DUAL_WRITE:
-            try:
-                vectors = self._embed_documents(texts)
-                docs = [VectorDocument(doc_id=doc_id, content=text, metadata=metadata, embedding=vector) for doc_id, text, metadata, vector in zip(ids, texts, metadatas, vectors)]
-                self._get_pgvector_store().upsert(docs, source_kind="knowledge")
-            except Exception as error:
-                self._safe_record_failures("upsert", [(doc_id, text, metadata) for doc_id, text, metadata in zip(ids, texts, metadatas)], error)
-                if config.VECTOR_BACKEND == "pgvector":
-                    raise
-                print(f"[WARN] knowledge pgvector dual-write failed: {error}", flush=True)
+            self._write_pgvector(texts, metadatas, ids)
         return ids
+
+    def _write_pgvector(self, texts, metadatas, ids) -> int:
+        """只写 pgvector；用于正常双写和从 Chroma 回填，避免回填重复写入 Chroma。"""
+        try:
+            vectors = self._embed_documents(texts)
+            docs = [
+                VectorDocument(doc_id=doc_id, content=text, metadata=metadata, embedding=vector)
+                for doc_id, text, metadata, vector in zip(ids, texts, metadatas, vectors)
+            ]
+            written = self._get_pgvector_store().upsert(docs, source_kind="knowledge")
+            if written != len(docs):
+                raise RuntimeError(
+                    f"knowledge pgvector upsert 数量不完整: expected={len(docs)}, written={written}"
+                )
+            return written
+        except Exception as error:
+            self._safe_record_failures(
+                "upsert",
+                [(doc_id, text, metadata) for doc_id, text, metadata in zip(ids, texts, metadatas)],
+                error,
+            )
+            if config.VECTOR_BACKEND == "pgvector":
+                raise
+            print(f"[WARN] knowledge pgvector dual-write failed: {error}", flush=True)
+            return 0
 
     def delete(self, ids):
         ids = list(ids)
@@ -138,8 +155,8 @@ class VectorStoreService(object):
         except Exception as outbox_error:
             print(f"[ERROR] failed to record knowledge pgvector outbox: {outbox_error}", flush=True)
 
-    def backfill_from_chroma(self, *, batch_size: int = 64) -> int:
-        """Idempotently copy the current Chroma collection into pgvector."""
+    def backfill_from_chroma(self, *, batch_size: int = 64, strict: bool = False) -> int:
+        """Idempotently copy Chroma into pgvector and return actual successful writes."""
         if not self._chroma_enabled:
             return 0
         if batch_size < 1:
@@ -148,11 +165,23 @@ class VectorStoreService(object):
         ids = result.get("ids", [])
         documents = result.get("documents", [])
         metadatas = result.get("metadatas", [])
+        if not (len(ids) == len(documents) == len(metadatas)):
+            raise RuntimeError(
+                "knowledge Chroma 回填快照长度不一致: "
+                f"ids={len(ids)}, documents={len(documents)}, metadatas={len(metadatas)}"
+            )
         total = 0
         for offset in range(0, len(ids), batch_size):
             end = offset + batch_size
-            self.add_texts(documents[offset:end], metadatas=metadatas[offset:end], ids=ids[offset:end])
-            total += len(ids[offset:end])
+            written = self._write_pgvector(
+                documents[offset:end], metadatas[offset:end], ids[offset:end]
+            )
+            total += written
+            if strict and written != len(ids[offset:end]):
+                raise RuntimeError(
+                    f"knowledge 回填批次失败: offset={offset}, "
+                    f"expected={len(ids[offset:end])}, written={written}"
+                )
         return total
 
     def get_retriever(self):
@@ -214,9 +243,9 @@ class VectorWardrobeService:
             raise RuntimeError("embedding 返回数量与待写入文档数量不一致")
         return embeddings
 
-    def _pgvector_write(self, items: list[tuple[str, str]]) -> None:
+    def _pgvector_write(self, items: list[tuple[str, str]]) -> int:
         if not items or not self._pgvector_enabled:
-            return
+            return 0
         documents = [
             VectorDocument(
                 doc_id=item_id,
@@ -226,7 +255,12 @@ class VectorWardrobeService:
             )
             for (item_id, text), embedding in zip(items, self._embed_documents([text for _, text in items]))
         ]
-        self._get_pgvector_store().upsert(documents, source_kind="wardrobe")
+        written = self._get_pgvector_store().upsert(documents, source_kind="wardrobe")
+        if written != len(documents):
+            raise RuntimeError(
+                f"wardrobe pgvector upsert 数量不完整: expected={len(documents)}, written={written}"
+            )
+        return written
 
     def _handle_pgvector_error(self, error: Exception) -> None:
         if config.VECTOR_BACKEND == "pgvector":
@@ -291,8 +325,8 @@ class VectorWardrobeService:
                 self._record_pgvector_failure("delete", [(item_id, "") for item_id in item_ids], error)
                 self._handle_pgvector_error(error)
 
-    def backfill_from_chroma(self, *, batch_size: int = 64) -> int:
-        """Idempotently copy the current wardrobe Chroma collection into pgvector."""
+    def backfill_from_chroma(self, *, batch_size: int = 64, strict: bool = False) -> int:
+        """Idempotently copy wardrobe Chroma into pgvector and return successful writes."""
         if self.vector_store is None:
             return 0
         if batch_size < 1:
@@ -301,14 +335,30 @@ class VectorWardrobeService:
         ids = result.get("ids", [])
         documents = result.get("documents", [])
         metadatas = result.get("metadatas", [])
+        if not (len(ids) == len(documents) == len(metadatas)):
+            raise RuntimeError(
+                "wardrobe Chroma 回填快照长度不一致: "
+                f"ids={len(ids)}, documents={len(documents)}, metadatas={len(metadatas)}"
+            )
         total = 0
         for offset in range(0, len(ids), batch_size):
             end = offset + batch_size
             batch = []
             for chroma_id, content, metadata in zip(ids[offset:end], documents[offset:end], metadatas[offset:end]):
                 batch.append((str((metadata or {}).get("item_id") or chroma_id), content))
-            self._pgvector_write(batch)
-            total += len(batch)
+            try:
+                written = self._pgvector_write(batch)
+            except Exception as error:
+                self._record_pgvector_failure("upsert", batch, error)
+                if strict:
+                    raise
+                written = 0
+            total += written
+            if strict and written != len(batch):
+                raise RuntimeError(
+                    f"wardrobe 回填批次失败: offset={offset}, "
+                    f"expected={len(batch)}, written={written}"
+                )
         return total
 
     def search(self, query: str, k: int = 15) -> list[str]:
