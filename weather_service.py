@@ -8,6 +8,10 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 import requests
 from supabase import Client
+from dotenv import load_dotenv
+
+# 加载 .env 文件
+load_dotenv()
 
 # 常用城市 location id 映射表
 # 数据来源：和风天气官方城市列表
