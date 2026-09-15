@@ -26,9 +26,9 @@ from langchain_community.embeddings import DashScopeEmbeddings
 import config_data as config
 import config_data as app_config
 from langchain_community.chat_models.tongyi import ChatTongyi
-from langchain_community.tools import DuckDuckGoSearchRun
 
 from native_memory import NativeMemoryRuntime, native_memory_requested
+from weather_service import WeatherService
 from conversation_service import ConversationRepository
 from memory_store import SupabaseMemoryStore
 from memory_jobs import MemoryJobRepository, make_turn_job
@@ -140,6 +140,7 @@ class RagService(object):
         self._native_pending_removals: list[str] = []
         self._native_pending_reset_messages: list[BaseMessage] = []
         self.memory_store = None
+        self.weather_service = WeatherService()
         if config.LONG_TERM_MEMORY_ENABLED:
             try:
                 self.memory_store = SupabaseMemoryStore(
@@ -730,21 +731,40 @@ class RagService(object):
         return answer
 
     def _weather_search(self, query: str) -> str:
-        current_year = datetime.datetime.now().year
-        current_month = datetime.datetime.now().month
-        query_with_date = f"{query} {current_year}年{current_month}月"
+        """查询指定城市的当前天气（Agent 工具调用入口）。
 
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                return DuckDuckGoSearchRun().run(query_with_date)
-            except Exception:
-                if attempt < max_retries - 1:
-                    continue
-                return (
-                    "【系统提示】：由于网络原因无法获取实时天气。"
-                    "请仅根据用户所在城市当前的普遍季节气候，为其规划穿搭。"
-                )
+        参数:
+            query: 城市名称，如"武陟"、"北京"
+        返回值:
+            天气描述文本，供 LLM 阅读
+        """
+        try:
+            weather_data = self.weather_service.get_current_weather(query)
+
+            # 如果降级返回了兜底文案字符串，直接返回
+            if isinstance(weather_data, str):
+                return weather_data
+
+            # 拼接成自然语言描述
+            city = weather_data.get("city", query)
+            temp = weather_data.get("temp", "")
+            feels_like = weather_data.get("feels_like", "")
+            text = weather_data.get("text", "")
+            wind_dir = weather_data.get("wind_dir", "")
+            wind_scale = weather_data.get("wind_scale", "")
+
+            return (
+                f"{city} 当前天气：{text}，气温 {temp}℃"
+                f"（体感 {feels_like}℃），{wind_dir}{wind_scale}"
+            )
+        except Exception as exc:
+            # 失败降级：使用 WeatherService 内置的 fallback
+            print(f"[WARN] _weather_search 失败: {exc}", flush=True)
+            result = self.weather_service.get_weather_with_fallback(query, data_type="now")
+            if isinstance(result, str):
+                return result
+            # 如果 fallback 返回了 dict，再次拼接
+            return f"{query} 当前天气：{result.get('text', '未知')}"
 
     def _extract_json_content(self, content: str) -> str:
         if "```" in content:
@@ -784,7 +804,30 @@ class RagService(object):
         # Step 1: 一次性获取未来一周天气
         if status_container:
             status_container.update(label="🌤️ 正在为您观测未来一周天象...")
-        weather_info = self._weather_search(f"{city} 未来一周 天气")
+
+        try:
+            forecast_list = self.weather_service.get_forecast_7d(city)
+            # 拼接成 LLM 可读的天气描述
+            weather_lines = []
+            for day_data in forecast_list:
+                date = day_data.get("date", "")
+                text_day = day_data.get("text_day", "")
+                text_night = day_data.get("text_night", "")
+                temp_min = day_data.get("temp_min", "")
+                temp_max = day_data.get("temp_max", "")
+                weather_lines.append(
+                    f"· {date} {text_day}转{text_night}，{temp_min}~{temp_max}℃"
+                )
+            weather_info = "\n".join(weather_lines)
+        except Exception as exc:
+            print(f"[WARN] 周计划天气查询失败: {exc}", flush=True)
+            # 降级：使用兜底文案
+            season = self.weather_service._get_current_season()
+            weather_info = (
+                f"【系统提示】：无法获取 {city} 的未来一周天气数据（API 限流或网络异常）。"
+                f"请根据当前季节（{season}）的普遍气候特征规划穿搭。"
+            )
+
         available_items = copy.deepcopy(wardrobe_items or [])
         wardrobe_text = self._format_wardrobe_items(available_items)
 
@@ -862,10 +905,8 @@ class RagService(object):
         search_tool = Tool(
             name="weather_search",
             description=(
-                "用于查询【指定城市】的近期天气。调用此工具时，【必须】从用户档案中提取"
-                "【所在城市】（例如'武陟'）构造查询参数，格式为'城市名 天气'（如'武陟 天气'）。"
-                "严禁查询'全国天气'、'全国'或任何不包含具体城市名的模糊查询。"
-                "搜索结果中如果包含多个日期的天气数据，只使用距离今天最近的数据，忽略超过3天前的数据。"
+                "用于查询【指定城市】的当前天气。调用此工具时，query 参数必须是具体城市名称"
+                "（例如 query='武陟'），返回该城市当前的温度、天气现象、风力等信息。"
             ),
             func=self._weather_search,
         )
