@@ -200,13 +200,24 @@ VECTOR_SHADOW_QUERY=true    # 读取仍用 Chroma，同时记录两端 Top-K ove
 
 将项目根目录下的 .env.example 复制并重命名为 .env。填入你在阿里云申请的 DashScope 秘钥，以及刚才创建的 Supabase 的连接信息：
 
+```bash
 # 阿里云百炼大模型 API Key
 DASHSCOPE_API_KEY="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
 
 # Supabase 项目 URL 和匿名 API Key (在 Project Settings -> API 中获取)
-SUPABASE_URL="[https://xxxxxxxxxxxx.supabase.co](https://xxxxxxxxxxxx.supabase.co)"
+SUPABASE_URL="https://xxxxxxxxxxxx.supabase.co"
 SUPABASE_KEY="eyJhbGciOiJIUzI1NiIsInR5c......"
 SUPABASE_DB_URL="postgresql://..."  # 仅启用 native memory 时配置，严禁暴露给浏览器
+
+# 和风天气 API 配置 (在 https://dev.qweather.com/ 注册获取)
+QWEATHER_API_KEY="your_qweather_api_key_here"
+QWEATHER_API_HOST="api.qweather.com"
+
+# LangSmith 追踪配置（可选，用于监控 Agent 调用链和性能）
+LANGCHAIN_API_KEY="your_langsmith_api_key_here"
+LANGCHAIN_TRACING_V2="true"
+LANGCHAIN_PROJECT="ai-outfit-advisor"
+LANGCHAIN_ENDPOINT="https://api.smith.langchain.com"
 ```
 
 如果部署到 Streamlit Cloud，不要上传 `.env` 或 `.streamlit/secrets.toml`。打开应用的 `Settings -> Secrets`，填入以下 TOML 配置：
@@ -216,11 +227,19 @@ DASHSCOPE_API_KEY = "你的 DashScope API Key"
 SUPABASE_URL = "你的 Supabase 项目 URL"
 SUPABASE_KEY = "你的 Supabase anon key"
 SUPABASE_DB_URL = "你的 Supabase DB URL（仅服务端 Secret）"
+
+# LangSmith 追踪配置（可选）
+LANGCHAIN_API_KEY = "你的 LangSmith API Key"
+LANGCHAIN_TRACING_V2 = "true"
+LANGCHAIN_PROJECT = "ai-outfit-advisor"
+LANGCHAIN_ENDPOINT = "https://api.smith.langchain.com"
 ```
 
 其中 `SUPABASE_KEY` 应使用 Supabase 项目 `Project Settings -> API` 中的 anon key，不要将 service role key 暴露给前端应用。
 
-修改 `requirements.txt` 或 Secrets 后，在 Streamlit Cloud 的应用菜单中选择 `Reboot app`；如果仍使用旧依赖缓存，请选择清除缓存后重新部署。
+**LangSmith 配置说明**：LangSmith 是 LangChain 官方提供的追踪和监控平台，启用后可以在 [LangSmith 控制台](https://smith.langchain.com/) 查看每次 Agent 调用的详细链路、工具调用记录、Token 消耗和性能指标。如果不需要此功能，可以不配置相关环境变量。
+
+修改 `requirements.txt` 或 Secrets 后，在 Streamlit Cloud 的应用菜单中选择 `Reboot app`；如果仍使用旧依赖缓存,请选择清除缓存后重新部署。
 
 第四步、启动服务
 
