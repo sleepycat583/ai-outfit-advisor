@@ -201,6 +201,8 @@ class RagService(object):
                 history.maybe_update_summary(summary_updater=self.summarize_chat_messages)
             except Exception as exc:
                 print(f"[WARN] 聊天历史写入不可用，已跳过持久化：{exc}", flush=True)
+                import traceback
+                traceback.print_exc()
 
             print(f"[PERF] RagService.stream_events total took {time.time() - total_start:.3f}s", flush=True)
             yield {"type": "answer", "content": answer}
@@ -454,6 +456,8 @@ class RagService(object):
             history.maybe_update_summary(summary_updater=self.summarize_chat_messages)
         except Exception as exc:
             print(f"[WARN] 聊天历史写入不可用，已跳过持久化：{exc}", flush=True)
+            import traceback
+            traceback.print_exc()
         return answer
 
     def _weather_search(self, query: str) -> str:
