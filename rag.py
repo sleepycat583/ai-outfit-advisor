@@ -32,6 +32,7 @@ from weather_service import WeatherService
 from conversation_service import ConversationRepository
 from memory_store import SupabaseMemoryStore
 from memory_jobs import MemoryJobRepository, make_turn_job
+from supabase_config import get_supabase_client
 
 
 class OOTDItem(BaseModel):
@@ -140,7 +141,8 @@ class RagService(object):
         self._native_pending_removals: list[str] = []
         self._native_pending_reset_messages: list[BaseMessage] = []
         self.memory_store = None
-        self.weather_service = WeatherService()
+        # 传入 Supabase 客户端以启用天气缓存功能
+        self.weather_service = WeatherService(supabase_client=get_supabase_client())
         if config.LONG_TERM_MEMORY_ENABLED:
             try:
                 self.memory_store = SupabaseMemoryStore(
