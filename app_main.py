@@ -65,17 +65,6 @@ if not st.session_state["authenticated"]:
         color: #999;
         margin-bottom: 1.8rem;
     }
-    @media (prefers-color-scheme: dark) {
-        [data-testid="stAppViewContainer"] {
-            background: #0d1117;
-        }
-        .auth-container {
-            background: #161b22;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-        }
-        .auth-title { color: #e6edf3; }
-        .auth-subtitle { color: #8b949e; }
-    }
     </style>
 
     <div class="auth-container">

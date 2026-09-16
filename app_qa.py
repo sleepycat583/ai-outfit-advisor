@@ -349,28 +349,6 @@ def render_page():
       --sidebar-border: #EAEAEA;
     }
 
-    /* ===== 暗色主题变量 ===== */
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg-primary: #0d1117;
-        --bg-secondary: #161b22;
-        --bg-sidebar: #0d1117;
-        --bg-user-bubble: #1c2340;
-        --bg-assistant-bubble: #161b22;
-        --text-primary: #e6edf3;
-        --text-secondary: #8b949e;
-        --border-color: #30363d;
-        --shadow-sm: 0 4px 12px rgba(0, 0, 0, 0.3);
-        --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.4);
-        --button-bg: #161b22;
-        --button-hover-bg: #1c2333;
-        --accent: #8ba888;
-        --accent-soft: #1c2820;
-        --input-bg: #161b22;
-        --sidebar-border: #21262d;
-      }
-    }
-
     /* ===== 全局背景 ===== */
     html, body, [data-testid="stAppViewContainer"] {
       background: var(--bg-primary);
@@ -528,14 +506,6 @@ def render_page():
       background: var(--bg-secondary);
       border: 1px solid var(--border-color);
       color: var(--text-primary);
-    }
-
-    /* ===== 滚动条暗色适配 ===== */
-    @media (prefers-color-scheme: dark) {
-      ::-webkit-scrollbar { width: 8px; }
-      ::-webkit-scrollbar-track { background: var(--bg-primary); }
-      ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
-      ::-webkit-scrollbar-thumb:hover { background: #484f58; }
     }
 
     /* ===== 终极修复：强制固定并抬高底部输入框 ===== */
