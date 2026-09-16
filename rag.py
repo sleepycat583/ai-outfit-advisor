@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_core.tools import Tool
+from langchain_core.tools import Tool, create_retriever_tool
 from history import FileChatMessageHistory
 from vector_store_service import VectorStoreService, VectorWardrobeService
 from prompts import RAG_SYSTEM_PROMPT, WEEKLY_PLAN_PROMPT
