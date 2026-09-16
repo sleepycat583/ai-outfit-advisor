@@ -44,15 +44,15 @@ def main():
                 if st.button("登录", use_container_width=True):
                     if login_username and login_password:
                         user_service = UserService()
-                        result = user_service.login(login_username, login_password)
+                        success, result = user_service.login(login_username, login_password)
 
-                        if result["success"]:
-                            st.session_state["user_id"] = result["user_id"]
+                        if success:
+                            st.session_state["user_id"] = result
                             st.session_state["username"] = login_username
                             st.success(f"欢迎回来，{login_username}！")
                             st.rerun()
                         else:
-                            st.error(result["message"])
+                            st.error(result)
                     else:
                         st.warning("请输入用户名和密码")
 
@@ -67,12 +67,12 @@ def main():
                             st.error("两次密码输入不一致")
                         else:
                             user_service = UserService()
-                            result = user_service.register(reg_username, reg_password)
+                            success, result = user_service.register(reg_username, reg_password)
 
-                            if result["success"]:
+                            if success:
                                 st.success("注册成功！请登录")
                             else:
-                                st.error(result["message"])
+                                st.error(result)
                     else:
                         st.warning("请填写完整信息")
 
