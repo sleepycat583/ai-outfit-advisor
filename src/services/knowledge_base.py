@@ -16,10 +16,10 @@ from langchain_chroma import Chroma
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-import config_data as config
-from supabase_config import get_supabase_client
+from config import base as config
+from config.supabase import get_supabase_client
 
-SEEDS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seeds")
+SEEDS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "seeds")
 SYSTEM_OPERATOR_ID = "system"
 HISTORICAL_OPERATOR_NAME = "历史用户"
 METADATA_VERSION = 2

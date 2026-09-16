@@ -6,7 +6,7 @@ pip install streamlit
 
 import streamlit as st
 import time
-from knowledge_base import KnowledgeBaseService
+from src.services.knowledge_base import KnowledgeBaseService
 
 
 def render_page():

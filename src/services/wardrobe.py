@@ -10,13 +10,13 @@ from typing import Optional, TYPE_CHECKING
 
 from PIL import Image
 
-import config_data as config
+from config import base as config
 import dashscope
-from prompts import VLM_ANALYZE_PROMPT
-from supabase_config import WARDROBE_BUCKET, get_supabase_client
+from src.core.prompts import VLM_ANALYZE_PROMPT
+from config.supabase import WARDROBE_BUCKET, get_supabase_client
 
 if TYPE_CHECKING:
-    from vector_store_service import VectorWardrobeService
+    from src.services.vector_store import VectorWardrobeService
 
 
 def _season_to_str(season) -> str:

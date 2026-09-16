@@ -10,14 +10,14 @@ from pydantic import BaseModel, Field
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import Tool, create_retriever_tool
-from history import FileChatMessageHistory
-from vector_store_service import VectorStoreService, VectorWardrobeService
-from prompts import RAG_SYSTEM_PROMPT, WEEKLY_PLAN_PROMPT
+from src.repositories.chat_history import FileChatMessageHistory
+from src.services.vector_store import VectorStoreService, VectorWardrobeService
+from src.core.prompts import RAG_SYSTEM_PROMPT, WEEKLY_PLAN_PROMPT
 from langchain_community.embeddings import DashScopeEmbeddings
-import config_data as config
+from config import base as config
 from langchain_community.chat_models.tongyi import ChatTongyi
-from weather_service import WeatherService
-from supabase_config import get_supabase_client
+from src.services.weather import WeatherService
+from config.supabase import get_supabase_client
 
 
 class OOTDItem(BaseModel):

@@ -5,7 +5,7 @@ import time
 import uuid
 from datetime import datetime
 
-from supabase_config import get_supabase_client
+from config.supabase import get_supabase_client
 
 
 def _now_iso() -> str:
