@@ -17,6 +17,7 @@ from langchain_community.embeddings import DashScopeEmbeddings
 import config_data as config
 from langchain_community.chat_models.tongyi import ChatTongyi
 from weather_service import WeatherService
+from supabase_config import get_supabase_client
 
 
 class OOTDItem(BaseModel):
@@ -117,7 +118,7 @@ class RagService(object):
         start_time = time.time()
         self.vector_wardrobe = vector_wardrobe
         self.user_id = user_id
-        self.weather_service = WeatherService()
+        self.weather_service = WeatherService(supabase_client=get_supabase_client())
 
         self.vector_service = VectorStoreService(
             embedding=DashScopeEmbeddings(model=config.EMBEDDING_MODEL_NAME),
