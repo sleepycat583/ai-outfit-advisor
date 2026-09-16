@@ -58,26 +58,52 @@ class PgVectorStore:
             raise ValueError("source_kind 必须是 knowledge 或 wardrobe")
         return source_kind
 
-    def upsert(self, documents: Iterable[VectorDocument], *, source_kind: str) -> int:
+    def next_operation_version(self) -> int:
+        """Allocate a process-independent monotonic version from PostgreSQL."""
+        conn = self._connection_factory()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT nextval('app_private.vector_sync_version_seq')")
+                version = int(cursor.fetchone()[0])
+            conn.commit()
+            return version
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def upsert(
+        self,
+        documents: Iterable[VectorDocument],
+        *,
+        source_kind: str,
+        operation_version: int = 0,
+    ) -> int:
         source_kind = self._validate_source_kind(source_kind)
+        if operation_version < 0:
+            raise ValueError("operation_version 不能为负数")
         documents = list(documents)
         if not documents:
             return 0
         conn = self._connection_factory()
         try:
+            written = 0
             with conn.cursor() as cursor:
                 for document in documents:
                     if not document.doc_id or not document.content.strip():
                         raise ValueError("doc_id 和 content 不能为空")
                     cursor.execute(
                         """INSERT INTO app_private.vector_documents
-                           (source_kind, user_id, doc_id, content, metadata, embedding)
-                           VALUES (%s, %s, %s, %s, %s::jsonb, %s::vector)
+                           (source_kind, user_id, doc_id, content, metadata, embedding, sync_version)
+                           VALUES (%s, %s, %s, %s, %s::jsonb, %s::vector, %s)
                            ON CONFLICT (source_kind, user_id, doc_id) DO UPDATE SET
                              content = EXCLUDED.content,
                              metadata = EXCLUDED.metadata,
                              embedding = EXCLUDED.embedding,
-                             updated_at = now()""",
+                             sync_version = EXCLUDED.sync_version,
+                             updated_at = now()
+                           WHERE app_private.vector_documents.sync_version <= EXCLUDED.sync_version""",
                         (
                             source_kind,
                             self.user_id,
@@ -85,10 +111,13 @@ class PgVectorStore:
                             document.content,
                             json.dumps(document.metadata, ensure_ascii=False),
                             _vector_literal(document.embedding),
+                            operation_version,
                         ),
                     )
+                    rowcount = getattr(cursor, "rowcount", None)
+                    written += 1 if rowcount is None else max(0, int(rowcount))
             conn.commit()
-            return len(documents)
+            return written
         except Exception:
             conn.rollback()
             raise
@@ -130,8 +159,16 @@ class PgVectorStore:
         finally:
             conn.close()
 
-    def delete(self, doc_ids: Iterable[str], *, source_kind: str) -> int:
+    def delete(
+        self,
+        doc_ids: Iterable[str],
+        *,
+        source_kind: str,
+        max_sync_version: int | None = None,
+    ) -> int:
         source_kind = self._validate_source_kind(source_kind)
+        if max_sync_version is not None and max_sync_version < 0:
+            raise ValueError("max_sync_version 不能为负数")
         ids = [doc_id for doc_id in doc_ids if doc_id]
         if not ids:
             return 0
@@ -141,8 +178,9 @@ class PgVectorStore:
                 cursor.execute(
                     """DELETE FROM app_private.vector_documents
                        WHERE source_kind = %s AND user_id = %s AND doc_id = ANY(%s)
+                         AND (%s IS NULL OR sync_version <= %s)
                        RETURNING doc_id""",
-                    (source_kind, self.user_id, ids),
+                    (source_kind, self.user_id, ids, max_sync_version, max_sync_version),
                 )
                 deleted = len(cursor.fetchall())
             conn.commit()
@@ -153,7 +191,24 @@ class PgVectorStore:
         finally:
             conn.close()
 
-    def delete_by_metadata(self, *, source_kind: str, key: str, value: str) -> int:
+    def versions_for_ids(self, doc_ids: Iterable[str], *, source_kind: str) -> dict[str, int]:
+        source_kind = self._validate_source_kind(source_kind)
+        ids = [doc_id for doc_id in doc_ids if doc_id]
+        if not ids:
+            return {}
+        conn = self._connection_factory()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """SELECT doc_id, sync_version FROM app_private.vector_documents
+                       WHERE source_kind = %s AND user_id = %s AND doc_id = ANY(%s)""",
+                    (source_kind, self.user_id, ids),
+                )
+                return {str(row[0]): int(row[1]) for row in cursor.fetchall()}
+        finally:
+            conn.close()
+
+    def delete_by_metadata(self, *, source_kind: str, key: str, value: str, max_sync_version: int | None = None) -> int:
         source_kind = self._validate_source_kind(source_kind)
         if not key:
             raise ValueError("metadata key 不能为空")
@@ -163,8 +218,9 @@ class PgVectorStore:
                 cursor.execute(
                     """DELETE FROM app_private.vector_documents
                        WHERE source_kind = %s AND user_id = %s AND metadata->>%s = %s
+                         AND (%s IS NULL OR sync_version <= %s)
                        RETURNING doc_id""",
-                    (source_kind, self.user_id, key, value),
+                    (source_kind, self.user_id, key, value, max_sync_version, max_sync_version),
                 )
                 deleted = len(cursor.fetchall())
             conn.commit()
@@ -175,7 +231,7 @@ class PgVectorStore:
         finally:
             conn.close()
 
-    def delete_all(self, *, source_kind: str) -> int:
+    def delete_all(self, *, source_kind: str, max_sync_version: int | None = None) -> int:
         source_kind = self._validate_source_kind(source_kind)
         conn = self._connection_factory()
         try:
@@ -183,8 +239,9 @@ class PgVectorStore:
                 cursor.execute(
                     """DELETE FROM app_private.vector_documents
                        WHERE source_kind = %s AND user_id = %s
+                         AND (%s IS NULL OR sync_version <= %s)
                        RETURNING doc_id""",
-                    (source_kind, self.user_id),
+                    (source_kind, self.user_id, max_sync_version, max_sync_version),
                 )
                 deleted = len(cursor.fetchall())
             conn.commit()
@@ -238,6 +295,7 @@ class PgVectorStore:
         doc_id: str,
         payload: dict[str, Any],
         error: Exception,
+        operation_version: int = 0,
     ) -> None:
         source_kind = self._validate_source_kind(source_kind)
         if operation not in {"upsert", "delete"}:
@@ -249,10 +307,11 @@ class PgVectorStore:
             with conn.cursor() as cursor:
                 cursor.execute(
                     """INSERT INTO app_private.vector_sync_outbox
-                       (source_kind, user_id, operation, doc_id, payload, last_error)
-                       VALUES (%s, %s, %s, %s, %s::jsonb, %s)
+                       (source_kind, user_id, operation, doc_id, operation_version, payload, last_error)
+                       VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s)
                        ON CONFLICT (source_kind, user_id, doc_id) DO UPDATE SET
                          operation = EXCLUDED.operation,
+                         operation_version = EXCLUDED.operation_version,
                          payload = EXCLUDED.payload,
                          last_error = EXCLUDED.last_error,
                          status = 'queued',
@@ -260,12 +319,14 @@ class PgVectorStore:
                          lease_until = NULL,
                          attempts = app_private.vector_sync_outbox.attempts + 1,
                          available_at = now(),
-                         updated_at = now()""",
+                         updated_at = now()
+                       WHERE app_private.vector_sync_outbox.operation_version <= EXCLUDED.operation_version""",
                     (
                         source_kind,
                         self.user_id,
                         operation,
                         doc_id,
+                        operation_version,
                         json.dumps(payload, ensure_ascii=False),
                         str(error)[:2000],
                     ),
@@ -298,12 +359,13 @@ class PgVectorStore:
                        FROM candidates
                        WHERE outbox.id = candidates.id
                        RETURNING outbox.id, outbox.source_kind, outbox.user_id, outbox.operation,
-                                 outbox.doc_id, outbox.payload, outbox.attempts, outbox.lease_token""",
+                                 outbox.doc_id, outbox.operation_version, outbox.payload,
+                                 outbox.attempts, outbox.lease_token""",
                     (limit, lease_seconds),
                 )
                 rows = cursor.fetchall()
             conn.commit()
-            return [dict(row) if not isinstance(row, tuple) else {"id": row[0], "source_kind": row[1], "user_id": row[2], "operation": row[3], "doc_id": row[4], "payload": row[5], "attempts": row[6], "lease_token": row[7]} for row in rows]
+            return [dict(row) if not isinstance(row, tuple) else {"id": row[0], "source_kind": row[1], "user_id": row[2], "operation": row[3], "doc_id": row[4], "operation_version": row[5], "payload": row[6], "attempts": row[7], "lease_token": row[8]} for row in rows]
         except Exception:
             conn.rollback()
             raise

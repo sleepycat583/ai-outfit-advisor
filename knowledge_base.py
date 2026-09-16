@@ -466,8 +466,10 @@ class KnowledgeBaseService(object):
             ids = result.get("ids", [])
         if ids and (config.VECTOR_BACKEND != "pgvector" or config.VECTOR_DUAL_WRITE):
             self._get_chroma().delete(ids=ids)
-        if self.vector_service:
-            self.vector_service.delete_by_metadata("source", source)
+        if self.vector_service and ids:
+            # Use the captured IDs so a failed pgvector write can enqueue exact
+            # document-level retries without a second metadata snapshot.
+            self.vector_service.delete(ids, delete_chroma=False)
 
         # 同时从 Supabase 中删除
         self.supabase.table("kb_documents").delete().eq(
@@ -485,8 +487,10 @@ class KnowledgeBaseService(object):
             ids = result.get("ids", [])
         if ids and (config.VECTOR_BACKEND != "pgvector" or config.VECTOR_DUAL_WRITE):
             self._get_chroma().delete(ids=ids)
-        if self.vector_service:
-            self.vector_service.delete_all()
+        if self.vector_service and ids:
+            # Reuse the same snapshot used for Chroma deletion and retry each
+            # target document independently when pgvector is unavailable.
+            self.vector_service.delete(ids, delete_chroma=False)
 
         # 同时清空 Supabase 中的记录
         self.supabase.table("kb_documents").delete().eq(

@@ -14,7 +14,11 @@ def process_event(store: PgVectorStore, event: dict[str, Any], *, max_attempts: 
     source_kind = str(event["source_kind"])
     try:
         if event["operation"] == "delete":
-            store.delete([str(event["doc_id"])], source_kind=source_kind)
+            store.delete(
+                [str(event["doc_id"])],
+                source_kind=source_kind,
+                max_sync_version=int(event.get("operation_version", 0)),
+            )
         elif event["operation"] == "upsert":
             payload = event.get("payload") or {}
             content = str(payload.get("content", ""))
@@ -25,6 +29,7 @@ def process_event(store: PgVectorStore, event: dict[str, Any], *, max_attempts: 
             store.upsert(
                 [VectorDocument(str(event["doc_id"]), content, metadata, embedding)],
                 source_kind=source_kind,
+                operation_version=int(event.get("operation_version", 0)),
             )
         else:
             raise ValueError(f"unknown outbox operation: {event['operation']}")

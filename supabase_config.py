@@ -7,6 +7,7 @@ Streamlit Cloud 使用临时文件系统，所有数据必须持久化到外部�
 import os
 import time
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 from supabase import Client, create_client
 
@@ -63,11 +64,42 @@ def get_database_url() -> str | None:
 
         value = st.secrets.get("SUPABASE_DB_URL")
         if value:
-            return str(value).strip()
+            normalized = _normalize_database_url(str(value))
+            if normalized:
+                return normalized
     except Exception:
         pass
-    value = os.environ.get("SUPABASE_DB_URL")
-    return value.strip() if value else None
+    return _normalize_database_url(os.environ.get("SUPABASE_DB_URL"))
+
+
+def _normalize_database_url(value: str | None) -> str | None:
+    """过滤空值和文档示例连接串，避免把占位主机交给 psycopg。
+
+    参数:
+        value: 环境变量或 Streamlit secret 中的 PostgreSQL 连接串。
+    返回值:
+        可交给 psycopg 的连接串；未配置或明显为占位值时返回 ``None``。
+
+    为什么需要这里校验：项目根目录的 ``.env`` 可能保留
+    ``postgresql://...`` 示例值。psycopg 会把 ``...`` 当作真实主机名并
+    触发 IDNA 编码异常，导致 legacy memory 也无法正常回退。
+    """
+    normalized = (value or "").strip()
+    if not normalized:
+        return None
+
+    if normalized.startswith(("postgresql://", "postgres://")):
+        try:
+            parsed = urlsplit(normalized)
+            hostname = parsed.hostname or ""
+            if not hostname or "..." in hostname:
+                return None
+            # Accessing port validates malformed values such as ``:abc``.
+            _ = parsed.port
+        except ValueError:
+            return None
+
+    return normalized
 
 
 # Storage bucket 名称

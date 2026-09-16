@@ -63,6 +63,36 @@ def test_upsert_scopes_documents_by_user_and_source_kind():
     assert conn.commits == 1
 
 
+def test_operation_version_is_allocated_by_private_postgres_sequence():
+    conn = FakeConnection()
+    conn.cursor_obj.rows = [(41,)]
+    store = PgVectorStore(lambda: conn, embedding=object(), user_id="user-a")
+
+    assert store.next_operation_version() == 41
+    query, params = conn.cursor_obj.calls[-1]
+    assert "nextval('app_private.vector_sync_version_seq')" in query
+    assert params is None
+    assert conn.commits == 1
+
+
+@pytest.mark.parametrize(
+    "method, kwargs",
+    [
+        ("delete", {"doc_ids": ["doc-1"], "source_kind": "knowledge"}),
+        ("delete_by_metadata", {"source_kind": "knowledge", "key": "source", "value": "seed"}),
+        ("delete_all", {"source_kind": "knowledge"}),
+    ],
+)
+def test_delete_variants_include_sync_version_guard(method, kwargs):
+    conn = FakeConnection()
+    store = PgVectorStore(lambda: conn, embedding=object(), user_id="user-a")
+
+    getattr(store, method)(**kwargs, max_sync_version=9)
+    query, params = conn.cursor_obj.calls[-1]
+    assert "sync_version <=" in query
+    assert params[-2:] == (9, 9)
+
+
 def test_search_rejects_cross_user_rows_and_returns_ranked_content():
     conn = FakeConnection()
     conn.cursor_obj.rows = [("doc-a", "用户A内容", {"owner": "a"}, 0.12)]
@@ -107,13 +137,18 @@ def test_vector_rollout_flags_are_conservative_by_default(monkeypatch):
 def test_pgvector_migration_is_private_and_has_reversible_target():
     from pathlib import Path
 
-    migration = (Path(__file__).parents[1] / "supabase" / "migrations" / "20260913120000_pgvector_private.sql").read_text(encoding="utf-8")
+    migration_root = Path(__file__).parents[1] / "supabase" / "migrations"
+    migration = (migration_root / "20260913120000_pgvector_private.sql").read_text(encoding="utf-8")
+    version_migration = (migration_root / "20260914100000_pgvector_sync_versions.sql").read_text(encoding="utf-8")
     assert "CREATE EXTENSION IF NOT EXISTS vector" in migration
     assert "WITH SCHEMA extensions" in migration
     assert "extensions.vector(1024)" in migration
     assert "app_private.vector_documents" in migration
     assert "extensions.vector(1024)" in migration
     assert "REVOKE ALL ON app_private.vector_documents" in migration
+    assert "ADD COLUMN IF NOT EXISTS sync_version" in version_migration
+    assert "ADD COLUMN IF NOT EXISTS operation_version" in version_migration
+    assert "CREATE SEQUENCE IF NOT EXISTS app_private.vector_sync_version_seq" in version_migration
     assert "ON CONFLICT (source_kind, user_id, doc_id)" in migration or "PRIMARY KEY (source_kind, user_id, doc_id)" in migration
 
 
@@ -188,9 +223,10 @@ def test_outbox_worker_acknowledges_only_after_target_write():
     class Store:
         embedding = object()
 
-        def upsert(self, documents, *, source_kind):
+        def upsert(self, documents, *, source_kind, operation_version=0):
             assert documents[0].content == "内容"
             assert source_kind == "knowledge"
+            assert operation_version == 0
 
         def complete_sync_event(self, event_id, lease_token):
             assert (event_id, lease_token) == (7, "lease")
@@ -201,6 +237,33 @@ def test_outbox_worker_acknowledges_only_after_target_write():
 
     event = {"id": 7, "lease_token": "lease", "source_kind": "knowledge", "operation": "upsert", "doc_id": "doc", "payload": {"content": "内容", "metadata": {}, "embedding": [0.1] * VECTOR_DIMENSION}}
     assert process_event(Store(), event) is True
+
+
+def test_outbox_worker_passes_delete_version_guard_to_target_store():
+    from vector_sync_worker import process_event
+
+    class Store:
+        def __init__(self):
+            self.delete_args = None
+
+        def delete(self, ids, *, source_kind, max_sync_version=None):
+            self.delete_args = (ids, source_kind, max_sync_version)
+
+        def complete_sync_event(self, event_id, lease_token):
+            return True
+
+    store = Store()
+    event = {
+        "id": 9,
+        "lease_token": "lease",
+        "source_kind": "knowledge",
+        "operation": "delete",
+        "doc_id": "doc-1",
+        "operation_version": 42,
+    }
+
+    assert process_event(store, event) is True
+    assert store.delete_args == (["doc-1"], "knowledge", 42)
 
 
 def test_wardrobe_dual_write_keeps_chroma_primary(monkeypatch, tmp_path):
@@ -221,7 +284,7 @@ def test_wardrobe_dual_write_keeps_chroma_primary(monkeypatch, tmp_path):
         def __init__(self):
             self.upserts = []
 
-        def upsert(self, documents, *, source_kind):
+        def upsert(self, documents, *, source_kind, operation_version=0):
             self.upserts.append((documents, source_kind))
             return len(documents)
 
@@ -313,7 +376,7 @@ def test_pgvector_backend_with_dual_write_keeps_chroma_rollback_copy(monkeypatch
             return [[0.1] * VECTOR_DIMENSION for _ in texts]
 
     class PgStore:
-        def upsert(self, documents, *, source_kind):
+        def upsert(self, documents, *, source_kind, operation_version=0):
             assert source_kind == "wardrobe"
             return len(documents)
 
@@ -344,7 +407,7 @@ def test_wardrobe_dual_write_failure_is_recorded_for_retry(monkeypatch, tmp_path
             return [[0.1] * VECTOR_DIMENSION for _ in texts]
 
     class PgStore:
-        def upsert(self, documents, *, source_kind):
+        def upsert(self, documents, *, source_kind, operation_version=0):
             raise RuntimeError("pg unavailable")
 
         def record_sync_failure(self, **kwargs):
@@ -417,7 +480,7 @@ def test_knowledge_backfill_writes_pgvector_without_readding_chroma(monkeypatch,
         def __init__(self):
             self.calls = []
 
-        def upsert(self, documents, *, source_kind):
+        def upsert(self, documents, *, source_kind, operation_version=0):
             self.calls.append((documents, source_kind))
             return len(documents)
 
@@ -453,7 +516,7 @@ def test_knowledge_backfill_reports_failed_dual_write_and_strict_mode(monkeypatc
         def __init__(self):
             self.failures = []
 
-        def upsert(self, documents, *, source_kind):
+        def upsert(self, documents, *, source_kind, operation_version=0):
             raise RuntimeError("pg unavailable")
 
         def record_sync_failure(self, **kwargs):
@@ -495,7 +558,7 @@ def test_wardrobe_backfill_reports_actual_writes_and_canonical_item_ids(monkeypa
         def __init__(self):
             self.calls = []
 
-        def upsert(self, documents, *, source_kind):
+        def upsert(self, documents, *, source_kind, operation_version=0):
             self.calls.append((documents, source_kind))
             return len(documents)
 
@@ -529,7 +592,7 @@ def test_wardrobe_backfill_rejects_partial_upsert_and_records_outbox(monkeypatch
         def __init__(self):
             self.failures = []
 
-        def upsert(self, documents, *, source_kind):
+        def upsert(self, documents, *, source_kind, operation_version=0):
             return 0
 
         def record_sync_failure(self, **kwargs):

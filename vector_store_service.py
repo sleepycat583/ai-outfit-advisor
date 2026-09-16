@@ -74,15 +74,20 @@ class VectorStoreService(object):
             self._write_pgvector(texts, metadatas, ids)
         return ids
 
-    def _write_pgvector(self, texts, metadatas, ids) -> int:
+    def _write_pgvector(self, texts, metadatas, ids, *, operation_version: int | None = None) -> int:
         """只写 pgvector；用于正常双写和从 Chroma 回填，避免回填重复写入 Chroma。"""
+        operation_version_for_failure = 0 if operation_version is None else operation_version
         try:
             vectors = self._embed_documents(texts)
             docs = [
                 VectorDocument(doc_id=doc_id, content=text, metadata=metadata, embedding=vector)
                 for doc_id, text, metadata, vector in zip(ids, texts, metadatas, vectors)
             ]
-            written = self._get_pgvector_store().upsert(docs, source_kind="knowledge")
+            store = self._get_pgvector_store()
+            if operation_version is None:
+                operation_version = store.next_operation_version() if hasattr(store, "next_operation_version") else 0
+            operation_version_for_failure = operation_version
+            written = store.upsert(docs, source_kind="knowledge", operation_version=operation_version)
             if written != len(docs):
                 raise RuntimeError(
                     f"knowledge pgvector upsert 数量不完整: expected={len(docs)}, written={written}"
@@ -93,31 +98,61 @@ class VectorStoreService(object):
                 "upsert",
                 [(doc_id, text, metadata) for doc_id, text, metadata in zip(ids, texts, metadatas)],
                 error,
+                operation_version=operation_version_for_failure,
             )
             if config.VECTOR_BACKEND == "pgvector":
                 raise
             print(f"[WARN] knowledge pgvector dual-write failed: {error}", flush=True)
             return 0
 
-    def delete(self, ids):
+    def delete(self, ids, *, delete_chroma: bool = True):
         ids = list(ids)
-        if self._chroma_enabled:
+        if delete_chroma and self._chroma_enabled:
             self._get_chroma().delete(ids=ids)
         if config.VECTOR_BACKEND == "pgvector" or config.VECTOR_DUAL_WRITE:
             try:
-                self._get_pgvector_store().delete(ids, source_kind="knowledge")
+                store = self._get_pgvector_store()
+                operation_version = store.next_operation_version() if hasattr(store, "next_operation_version") else 0
+                versions = store.versions_for_ids(ids, source_kind="knowledge") if hasattr(store, "versions_for_ids") else {}
+                for doc_id in ids:
+                    store.delete(
+                        [doc_id],
+                        source_kind="knowledge",
+                        max_sync_version=versions.get(doc_id, operation_version),
+                    )
             except Exception as error:
-                self._safe_record_failures("delete", [(doc_id, "", {}) for doc_id in ids], error)
+                self._safe_record_failures("delete", [(doc_id, "", {}) for doc_id in ids], error, operation_version=locals().get("operation_version", 0))
                 if config.VECTOR_BACKEND == "pgvector":
                     raise
 
     def delete_by_metadata(self, key: str, value: str) -> None:
-        if config.VECTOR_BACKEND == "pgvector" or config.VECTOR_DUAL_WRITE:
-            self._get_pgvector_store().delete_by_metadata(source_kind="knowledge", key=key, value=value)
+        if not (config.VECTOR_BACKEND == "pgvector" or config.VECTOR_DUAL_WRITE):
+            return
+        if self._chroma_enabled:
+            result = self._get_chroma().get(where={key: value}, include=["metadatas"])
+            ids = list(result.get("ids", []))
+            if ids:
+                self._get_chroma().delete(ids=ids)
+            if ids:
+                self.delete(ids, delete_chroma=False)
+            return
+        store = self._get_pgvector_store()
+        operation_version = store.next_operation_version() if hasattr(store, "next_operation_version") else 0
+        store.delete_by_metadata(source_kind="knowledge", key=key, value=value, max_sync_version=operation_version)
 
     def delete_all(self) -> None:
-        if config.VECTOR_BACKEND == "pgvector" or config.VECTOR_DUAL_WRITE:
-            self._get_pgvector_store().delete_all(source_kind="knowledge")
+        if not (config.VECTOR_BACKEND == "pgvector" or config.VECTOR_DUAL_WRITE):
+            return
+        if self._chroma_enabled:
+            result = self._get_chroma().get()
+            ids = list(result.get("ids", []))
+            if ids:
+                self._get_chroma().delete(ids=ids)
+                self.delete(ids, delete_chroma=False)
+            return
+        store = self._get_pgvector_store()
+        operation_version = store.next_operation_version() if hasattr(store, "next_operation_version") else 0
+        store.delete_all(source_kind="knowledge", max_sync_version=operation_version)
 
     def search(self, query: str, k: int = 4):
         start_time = time.time()
@@ -141,7 +176,7 @@ class VectorStoreService(object):
                 print(json.dumps({"event": "vector_shadow_error", "source_kind": "knowledge", "error": str(error)[:500]}, ensure_ascii=False), flush=True)
         return chroma_docs
 
-    def _safe_record_failures(self, operation, items, error) -> None:
+    def _safe_record_failures(self, operation, items, error, *, operation_version: int = 0) -> None:
         try:
             store = self._get_pgvector_store()
             for doc_id, text, metadata in items:
@@ -151,6 +186,7 @@ class VectorStoreService(object):
                     doc_id=doc_id,
                     payload={"content": text, "metadata": metadata},
                     error=error,
+                    operation_version=operation_version,
                 )
         except Exception as outbox_error:
             print(f"[ERROR] failed to record knowledge pgvector outbox: {outbox_error}", flush=True)
@@ -174,7 +210,7 @@ class VectorStoreService(object):
         for offset in range(0, len(ids), batch_size):
             end = offset + batch_size
             written = self._write_pgvector(
-                documents[offset:end], metadatas[offset:end], ids[offset:end]
+                documents[offset:end], metadatas[offset:end], ids[offset:end], operation_version=0
             )
             total += written
             if strict and written != len(ids[offset:end]):
@@ -243,7 +279,7 @@ class VectorWardrobeService:
             raise RuntimeError("embedding 返回数量与待写入文档数量不一致")
         return embeddings
 
-    def _pgvector_write(self, items: list[tuple[str, str]]) -> int:
+    def _pgvector_write(self, items: list[tuple[str, str]], *, operation_version: int | None = None) -> int:
         if not items or not self._pgvector_enabled:
             return 0
         documents = [
@@ -255,7 +291,10 @@ class VectorWardrobeService:
             )
             for (item_id, text), embedding in zip(items, self._embed_documents([text for _, text in items]))
         ]
-        written = self._get_pgvector_store().upsert(documents, source_kind="wardrobe")
+        store = self._get_pgvector_store()
+        if operation_version is None:
+            operation_version = store.next_operation_version() if hasattr(store, "next_operation_version") else 0
+        written = store.upsert(documents, source_kind="wardrobe", operation_version=operation_version)
         if written != len(documents):
             raise RuntimeError(
                 f"wardrobe pgvector upsert 数量不完整: expected={len(documents)}, written={written}"
@@ -267,7 +306,7 @@ class VectorWardrobeService:
             raise error
         print(f"[WARN] pgvector shadow/dual-write failed; Chroma remains primary: {error}", flush=True)
 
-    def _record_pgvector_failure(self, operation: str, items: list[tuple[str, str]], error: Exception) -> None:
+    def _record_pgvector_failure(self, operation: str, items: list[tuple[str, str]], error: Exception, *, operation_version: int = 0) -> None:
         if not self._pgvector_enabled:
             return
         try:
@@ -279,6 +318,7 @@ class VectorWardrobeService:
                     doc_id=item_id,
                     payload={"content": text, "item_id": item_id},
                     error=error,
+                    operation_version=operation_version,
                 )
         except Exception as outbox_error:
             print(f"[ERROR] failed to record pgvector sync outbox: {outbox_error}", flush=True)
@@ -294,10 +334,13 @@ class VectorWardrobeService:
                 metadatas=[{"item_id": iid} for iid in ids],
                 ids=list(ids),
             )
+        operation_version = 0
         try:
-            self._pgvector_write(items)
+            store = self._get_pgvector_store()
+            operation_version = store.next_operation_version() if hasattr(store, "next_operation_version") else 0
+            self._pgvector_write(items, operation_version=operation_version)
         except Exception as error:
-            self._record_pgvector_failure("upsert", items, error)
+            self._record_pgvector_failure("upsert", items, error, operation_version=operation_version)
             self._handle_pgvector_error(error)
 
     def update_items(self, items: list[tuple[str, str]]) -> None:
@@ -319,10 +362,15 @@ class VectorWardrobeService:
             if existing and existing.get("ids"):
                 self._get_chroma().delete(ids=existing["ids"])
         if self._pgvector_enabled:
+            operation_version = 0
             try:
-                self._get_pgvector_store().delete(item_ids, source_kind="wardrobe")
+                store = self._get_pgvector_store()
+                operation_version = store.next_operation_version() if hasattr(store, "next_operation_version") else 0
+                versions = store.versions_for_ids(item_ids, source_kind="wardrobe") if hasattr(store, "versions_for_ids") else {}
+                for item_id in item_ids:
+                    store.delete([item_id], source_kind="wardrobe", max_sync_version=versions.get(item_id, operation_version))
             except Exception as error:
-                self._record_pgvector_failure("delete", [(item_id, "") for item_id in item_ids], error)
+                self._record_pgvector_failure("delete", [(item_id, "") for item_id in item_ids], error, operation_version=operation_version)
                 self._handle_pgvector_error(error)
 
     def backfill_from_chroma(self, *, batch_size: int = 64, strict: bool = False) -> int:
@@ -347,7 +395,7 @@ class VectorWardrobeService:
             for chroma_id, content, metadata in zip(ids[offset:end], documents[offset:end], metadatas[offset:end]):
                 batch.append((str((metadata or {}).get("item_id") or chroma_id), content))
             try:
-                written = self._pgvector_write(batch)
+                written = self._pgvector_write(batch, operation_version=0)
             except Exception as error:
                 self._record_pgvector_failure("upsert", batch, error)
                 if strict:
