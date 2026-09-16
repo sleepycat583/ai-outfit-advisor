@@ -90,18 +90,29 @@ class WeatherService:
         Args:
             supabase_client: Supabase 客户端实例（用于缓存）
         """
-        self.api_key = self._get_api_key()
-        self.api_host = "kh359hq4fh.re.qweatherapi.com"  # 专属 API Host
         self.supabase = supabase_client
         self.cache_ttl_hours = 24  # 缓存有效期 24 小时
 
-    def _get_api_key(self) -> str:
-        """从环境变量获取 API Key"""
+        # 尝试获取 API Key，失败时标记为不可用
+        self.api_key = self._get_api_key()
+        if self.api_key:
+            self.api_host = "kh359hq4fh.re.qweatherapi.com"  # 专属 API Host
+            self.available = True
+        else:
+            self.api_host = ""
+            self.available = False
+            print(
+                "[WARN] 和风天气服务初始化失败：未配置 API Key。"
+                "天气相关功能将使用季节常识兜底，穿搭建议的准确性可能下降。"
+                "请在 Streamlit Secrets 或 .env 中配置 QWEATHER_API_KEY。",
+                flush=True
+            )
+
+    def _get_api_key(self) -> Optional[str]:
+        """从环境变量获取 API Key，失败返回 None 而不是 raise"""
         api_key = os.getenv("QWEATHER_API_KEY")
         if not api_key:
-            raise ValueError(
-                "未找到和风天气 API Key。请在 .env 文件或环境变量中设置 QWEATHER_API_KEY"
-            )
+            return None
         return api_key
 
     def get_location_id(self, city_name: str) -> Optional[str]:
@@ -119,7 +130,7 @@ class WeatherService:
         return CITY_LOCATION_MAP.get(city_clean)
 
     def _read_cache(
-        self, city: str, date: str, data_type: str
+        self, city: str, date: str, data_type: str, ignore_ttl: bool = False
     ) -> Optional[Dict[str, Any]]:
         """
         从 Supabase 缓存表读取天气数据
@@ -128,6 +139,7 @@ class WeatherService:
             city: 城市名称
             date: 日期 (YYYY-MM-DD)
             data_type: "now" 或 "forecast"
+            ignore_ttl: 是否忽略 TTL（用于降级场景读取过期缓存）
 
         Returns:
             缓存的天气数据，如果不存在或过期返回 None
@@ -136,22 +148,25 @@ class WeatherService:
             return None
 
         try:
-            # 计算过期时间
-            expire_time = datetime.now() - timedelta(hours=self.cache_ttl_hours)
-
-            response = (
+            query = (
                 self.supabase.table("weather_cache")
                 .select("weather_data, updated_at")
                 .eq("city", city)
                 .eq("date", date)
                 .eq("data_type", data_type)
-                .gte("updated_at", expire_time.isoformat())
-                .execute()
             )
 
+            # 正常场景：只读未过期的
+            if not ignore_ttl:
+                expire_time = datetime.now() - timedelta(hours=self.cache_ttl_hours)
+                query = query.gte("updated_at", expire_time.isoformat())
+
+            response = query.execute()
+
             if response.data and len(response.data) > 0:
+                cache_label = "过期缓存" if ignore_ttl else "缓存"
                 print(
-                    f"[INFO] 天气缓存命中: {city} {date} {data_type}", flush=True
+                    f"[INFO] 天气{cache_label}命中: {city} {date} {data_type}", flush=True
                 )
                 return response.data[0]["weather_data"]
 
@@ -193,7 +208,44 @@ class WeatherService:
         except Exception as e:
             print(f"[WARN] 写入天气缓存失败: {e}", flush=True)
 
-    def get_current_weather(self, city: str) -> Dict[str, Any]:
+    def _get_current_season(self) -> str:
+        """根据当前月份返回季节"""
+        month = datetime.now().month
+        if month in (3, 4, 5):
+            return "春季"
+        elif month in (6, 7, 8):
+            return "夏季"
+        elif month in (9, 10, 11):
+            return "秋季"
+        else:
+            return "冬季"
+
+    def _get_season_fallback_text(self, city: str, data_type: str) -> str:
+        """
+        生成基于季节常识的兜底文案
+
+        Args:
+            city: 城市名称
+            data_type: "now" 或 "forecast"
+
+        Returns:
+            兜底文案字符串
+        """
+        season = self._get_current_season()
+        season_hints = {
+            "春季": "气温适中，早晚温差较大，建议准备薄外套",
+            "夏季": "气温较高，注意防晒和透气性",
+            "秋季": "气温逐渐转凉，建议叠穿搭配",
+            "冬季": "气温较低，注意保暖",
+        }
+        hint = season_hints.get(season, "")
+
+        if data_type == "now":
+            return f"{city} 当前天气数据暂不可用（系统降级：按{season}常识推荐）。{hint}"
+        else:  # forecast
+            return f"{city} 未来一周天气数据暂不可用（系统降级：按{season}常识推荐）。{hint}"
+
+    def get_current_weather(self, city: str) -> Dict[str, Any] | str:
         """
         获取当前天气（优先从缓存读取）
 
@@ -201,15 +253,17 @@ class WeatherService:
             city: 城市名称
 
         Returns:
-            结构化天气数据 dict
-
-        Raises:
-            ValueError: 城市不支持
-            RuntimeError: API 请求失败
+            成功：结构化天气数据 dict
+            降级：兜底文案 str
         """
+        # 降级路径 1：服务根本不可用（没 key）
+        if not self.available:
+            return self._get_season_fallback_text(city, "now")
+
         location_id = self.get_location_id(city)
         if not location_id:
-            raise ValueError(f"不支持的城市: {city}。请联系管理员添加该城市。")
+            season = self._get_current_season()
+            return f"{city} 不在支持城市列表中（系统降级：按{season}常识推荐）"
 
         today = datetime.now().strftime("%Y-%m-%d")
 
@@ -248,14 +302,26 @@ class WeatherService:
 
                 return weather_data
             else:
-                raise RuntimeError(
-                    f"和风天气 API 返回错误: {data.get('code', 'unknown')}"
-                )
+                # API 返回错误码（401/403/429/其他业务错误）
+                print(f"[WARN] 和风天气 API 返回错误: code={data.get('code', 'unknown')}, status={response.status_code}", flush=True)
+                # 降级路径 2：尝试读过期缓存
+                expired_cache = self._read_cache(city, today, "now", ignore_ttl=True)
+                if expired_cache:
+                    return expired_cache
+                # 降级路径 3：季节兜底
+                return self._get_season_fallback_text(city, "now")
 
         except requests.RequestException as e:
-            raise RuntimeError(f"和风天气 API 请求失败: {e}")
+            # 网络错误、超时
+            print(f"[WARN] 和风天气 API 请求失败: {e}", flush=True)
+            # 降级路径 2：尝试读过期缓存
+            expired_cache = self._read_cache(city, today, "now", ignore_ttl=True)
+            if expired_cache:
+                return expired_cache
+            # 降级路径 3：季节兜底
+            return self._get_season_fallback_text(city, "now")
 
-    def get_forecast_7d(self, city: str) -> List[Dict[str, Any]]:
+    def get_forecast_7d(self, city: str) -> List[Dict[str, Any]] | str:
         """
         获取未来 7 天预报（优先从缓存读取）
 
@@ -263,15 +329,17 @@ class WeatherService:
             city: 城市名称
 
         Returns:
-            7 天预报数据的 list
-
-        Raises:
-            ValueError: 城市不支持
-            RuntimeError: API 请求失败
+            成功：7 天预报数据的 list
+            降级：兜底文案 str
         """
+        # 降级路径 1：服务根本不可用（没 key）
+        if not self.available:
+            return self._get_season_fallback_text(city, "forecast")
+
         location_id = self.get_location_id(city)
         if not location_id:
-            raise ValueError(f"不支持的城市: {city}。请联系管理员添加该城市。")
+            season = self._get_current_season()
+            return f"{city} 不在支持城市列表中（系统降级：按{season}常识推荐）"
 
         today = datetime.now().strftime("%Y-%m-%d")
 
@@ -314,12 +382,24 @@ class WeatherService:
 
                 return forecast_data
             else:
-                raise RuntimeError(
-                    f"和风天气 API 返回错误: {data.get('code', 'unknown')}"
-                )
+                # API 返回错误码
+                print(f"[WARN] 和风天气 API 返回错误: code={data.get('code', 'unknown')}, status={response.status_code}", flush=True)
+                # 降级路径 2：尝试读过期缓存
+                expired_cache = self._read_cache(city, today, "forecast", ignore_ttl=True)
+                if expired_cache:
+                    return expired_cache
+                # 降级路径 3：季节兜底
+                return self._get_season_fallback_text(city, "forecast")
 
         except requests.RequestException as e:
-            raise RuntimeError(f"和风天气 API 请求失败: {e}")
+            # 网络错误、超时
+            print(f"[WARN] 和风天气 API 请求失败: {e}", flush=True)
+            # 降级路径 2：尝试读过期缓存
+            expired_cache = self._read_cache(city, today, "forecast", ignore_ttl=True)
+            if expired_cache:
+                return expired_cache
+            # 降级路径 3：季节兜底
+            return self._get_season_fallback_text(city, "forecast")
 
     def format_current_weather_text(self, weather_data: Dict[str, Any]) -> str:
         """
