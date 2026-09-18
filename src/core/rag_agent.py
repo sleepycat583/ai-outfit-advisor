@@ -44,6 +44,7 @@ LANGGRAPH_IMPORT_ERROR_MESSAGE = (
 TOOL_EVENT_LABELS = {
     "weather_search": ("🌤️", "正在观测天象", "查询天气"),
     "knowledge_base_search": ("📚", "正在翻阅时尚秘籍", "检索穿搭知识"),
+    "wardrobe_search": ("👗", "正在翻找衣橱", "检索衣橱单品"),
 }
 
 
@@ -138,16 +139,9 @@ class RagService(object):
         return updated_inputs
 
     def _prepare_inputs(self, inputs: dict) -> dict:
-        """预处理输入：注入当前日期，并通过向量检索压缩衣橱文本。"""
+        """预处理输入：注入当前日期。"""
         start_time = time.time()
         inputs = self._with_current_date(inputs)
-        if self.vector_wardrobe:
-            query = inputs.get("input", "")
-            wardrobe_text = inputs.get("wardrobe", "")
-            if query and wardrobe_text:
-                top_texts = self.vector_wardrobe.search(query, k=15)
-                if top_texts:
-                    inputs["wardrobe"] = "\n".join(top_texts)
         print(f"[PERF] RagService._prepare_inputs took {time.time() - start_time:.3f}s", flush=True)
         return inputs
 
@@ -268,7 +262,6 @@ class RagService(object):
             "style": inputs.get("style", "未设置"),
             "body": inputs.get("body", ""),
             "city": inputs.get("city", ""),
-            "wardrobe": inputs.get("wardrobe", "暂无已录入的单品（请先去「智能衣橱」拍照上传）"),
         }
         return RAG_SYSTEM_PROMPT.format(**prompt_inputs)
 
@@ -488,6 +481,27 @@ class RagService(object):
             f"（体感 {feels_like}℃），{wind_dir}{wind_scale}"
         )
 
+    def _wardrobe_search(self, query: str) -> str:
+        """
+        在用户数字衣橱中检索相关单品。
+
+        参数:
+            query: 用户的自然语言查询，如"适合面试的外套"、"黑色裤子"
+        返回值:
+            衣橱单品描述文本列表，供 LLM 阅读。如果衣橱为空或检索服务不可用，返回提示文本。
+        """
+        if not self.vector_wardrobe:
+            return "衣橱检索服务不可用，请提示用户先去「智能衣橱」录入单品。"
+
+        try:
+            top_texts = self.vector_wardrobe.search(query, k=15)
+            if not top_texts:
+                return "衣橱中暂无相关单品，建议用户先去「智能衣橱」录入或推荐购入单品。"
+            return "\n".join(top_texts)
+        except Exception as exc:
+            print(f"[WARN] 衣橱检索失败：{exc}", flush=True)
+            return "衣橱检索暂时不可用。"
+
     def _extract_json_content(self, content: str) -> str:
         if "```" in content:
             stripped = content.strip()
@@ -644,6 +658,26 @@ class RagService(object):
             print(
                 "[INFO] 天气工具未注册：和风天气服务不可用。"
                 "Agent 将基于季节常识和用户偏好进行穿搭推荐。",
+                flush=True
+            )
+
+        # 3. 衣橱工具（仅在服务可用时注册）
+        if self.vector_wardrobe:
+            wardrobe_tool = Tool(
+                name="wardrobe_search",
+                description=(
+                    "在用户的数字衣橱中检索相关单品。"
+                    "输入参数：自然语言查询，如'适合面试的外套'、'黑色裤子'、'春季内搭'。"
+                    "返回：衣橱中符合查询条件的单品列表，包括id、类别、颜色、材质、适季等信息。"
+                    "使用场景：当需要基于用户已有衣橱推荐穿搭、组合搭配、或检查是否有某类单品时，必须调用此工具。"
+                ),
+                func=self._wardrobe_search,
+            )
+            tools.append(wardrobe_tool)
+        else:
+            print(
+                "[INFO] 衣橱工具未注册：衣橱向量服务不可用。"
+                "Agent 将基于用户偏好和知识库进行穿搭推荐。",
                 flush=True
             )
 

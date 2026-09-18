@@ -165,6 +165,7 @@ def render_page():
         TOOL_LABELS = {
             "weather_search": ("🌤️", "正在观测天象", "查询天气"),
             "knowledge_base_search": ("📚", "正在翻阅时尚秘籍", "检索穿搭知识"),
+            "wardrobe_search": ("👗", "正在翻找衣橱", "检索衣橱单品"),
         }
 
         def __init__(self):
@@ -585,20 +586,6 @@ def render_page():
             with st.chat_message("assistant"):
                 with st.status("小衣正在为您精心搭配...", expanded=True) as status:
                     try:
-                        # 格式化衣橱数据供 Agent 优先使用
-                        if wardrobe_items:
-                            wardrobe_lines = []
-                            for item in wardrobe_items:
-                                wardrobe_lines.append(
-                                    f"- id:{item.get('id', '')} "
-                                    f"{item.get('category', '')}/{item.get('sub_category', '')} "
-                                    f"颜色:{item.get('color', '')} 材质:{item.get('material', '')} "
-                                    f"适季:{item.get('season', '')}"
-                                )
-                            wardrobe_text = "\n".join(wardrobe_lines)
-                        else:
-                            wardrobe_text = "暂无已录入的单品（请先去「智能衣橱」拍照上传）"
-
                         res = FALLBACK_MESSAGE
                         qa_start = time.time()
                         for event in st.session_state["rag"].stream_events(
@@ -608,7 +595,6 @@ def render_page():
                                 "style": st.session_state.get("user_style", "日常休闲"),
                                 "body": st.session_state.get("user_body", ""),
                                 "city": st.session_state.get("user_city", ""),
-                                "wardrobe": wardrobe_text,
                                 "current_date": datetime.datetime.now().strftime("%Y年%m月%d日"),
                             },
                             config={
