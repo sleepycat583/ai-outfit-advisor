@@ -1,8 +1,14 @@
+"""穿搭问答 RAG 服务与 LangGraph Agent 编排逻辑。
+
+本模块连接天气、知识库和衣橱检索工具，并将最终回答交给 Streamlit 问答页渲染。
+"""
+
 from typing import Optional
 
 import datetime
 import copy
 import json
+import re
 import time
 
 from pydantic import BaseModel, Field
@@ -227,6 +233,12 @@ class RagService(object):
         configurable.setdefault("thread_id", session_id)
         configurable.setdefault("session_id", session_id)
         config["configurable"] = configurable
+
+        # 设置递归限制防止LangGraph ReAct Agent死循环
+        # 正常流程: wardrobe_search(1次) + knowledge_base_search(0-1次) + weather_search(0-1次) = 2-3次工具调用
+        # 设置15次足够应对复杂场景,同时防止压缩格式或提示词问题导致的无限循环
+        config.setdefault("recursion_limit", 15)
+
         return config
 
     def _coerce_history_messages(self, raw_messages) -> list[BaseMessage]:
@@ -481,9 +493,111 @@ class RagService(object):
             f"（体感 {feels_like}℃），{wind_dir}{wind_scale}"
         )
 
-    def _wardrobe_search(self, query: str) -> str:
+    def _estimate_topk(self, query: str) -> int:
+        """根据query复杂度估算需要检索的Top-K数量。
+
+        规则:
+        - 简单查询(0-1维度 且 ≤5字): k=5
+          示例: "外套", "裤子", "黑色", "黑色裤子"
+        - 中等查询(2维度): k=8
+          示例: "黑色外套", "春季上衣", "休闲裤子"
+        - 复杂查询(3+维度或场景): k=12
+          示例: "黑色春季外套", "适合面试的正式穿搭"
+
+        参数:
+            query: 用户查询文本
+
+        返回:
+            建议的Top-K数量(5/8/12)
         """
-        在用户数字衣橱中检索相关单品。
+        # 场景类查询直接返回k=12(通常需要多件单品组合)
+        scene_keywords = ["适合", "面试", "约会", "聚会", "通勤", "出游", "旅行", "派对", "穿搭", "搭配"]
+        if any(kw in query for kw in scene_keywords):
+            return 12
+
+        # 统计query中的关键维度词
+        complexity_markers = [
+            ("季节", ["春", "夏", "秋", "冬", "早春", "初秋", "盛夏", "寒冬"]),
+            ("颜色", ["黑", "白", "蓝", "红", "灰", "米", "卡其", "藏青", "深蓝", "浅蓝", "棕", "绿"]),
+            ("风格", ["休闲", "正式", "运动", "甜美", "帅气", "简约", "复古", "街头", "优雅"]),
+            ("类别", ["外套", "裤子", "裙子", "鞋", "上衣", "内搭", "大衣", "夹克", "衬衫", "T恤"]),
+        ]
+
+        dimension_count = sum(
+            1 for _, keywords in complexity_markers
+            if any(kw in query for kw in keywords)
+        )
+
+        # 基于字数和维度的k值策略
+        # 规则: 字数优先级高于维度数,避免"黑色裤子"(4字2维度)被误判为k=8
+        query_len = len(query)
+
+        if query_len <= 5:
+            # ≤5字无论几个维度都是简单查询
+            return 5
+        elif dimension_count >= 3 or query_len >= 11:
+            # 3+维度或≥11字是复杂查询
+            return 12
+        elif dimension_count == 2:
+            # 6-10字且2维度是中等查询
+            return 8
+        else:
+            # 其他情况默认简单查询
+            return 5
+
+    def _compress_wardrobe_results(self, query: str, items: list[str]) -> str:
+        """简单高效的压缩策略:直接截断到Top-6,避免LLM压缩导致的格式破坏和死循环风险。
+
+        原因:
+        1. LLM压缩虽然理论上可行,但容易导致格式混乱,使AI无法正确识别item ID
+        2. 这导致AI重复调用wardrobe_search,陷入死循环
+        3. 直接Top-6是最稳定可靠的方案,对召回率影响有限
+
+        参数:
+            query: 用户原始查询(此方法中未使用,保留以兼容接口)
+            items: 检索到的单品文本列表(格式: "- id:xxx 类别:xxx/xxx 颜色:xxx 材质:xxx 适季:xxx")
+
+        返回:
+            压缩到最多6条的单品描述文本(保留100%的原始ID格式)
+        """
+        # 直接截断到Top-6,保证格式完全不变
+        return "\n".join(items[:6]) if len(items) > 6 else "\n".join(items)
+
+    def _format_wardrobe_for_llm(self, items: list[str]) -> str:
+        """为 LLM 格式化衣橱检索结果，确保 ID 格式清晰易提取。
+
+        为什么这样做：
+        - 返回的 items 格式为 "- id:XXXX 类别:..."
+        - AI 需要从中提取 XXXX 部分作为卡片 ID
+        - 通过添加更多视觉分隔符，帮助 AI 更准确地识别和提取 ID
+        """
+        if not items:
+            return ""
+
+        # 对每一行进行标准化处理，确保 ID 部分清晰可辨。
+        # 这里再次校验是为了防止非 Chroma 实现或测试替身绕过 VectorWardrobeService。
+        formatted_items = []
+        for item in items:
+            text = str(item or "").strip()
+            match = re.search(r"(?:^|\s)-?\s*id:([^\s]+)", text)
+            if not match:
+                print(f"[WARN] 丢弃缺少真实 ID 的衣橱检索结果: {text[:120]}", flush=True)
+                continue
+
+            item_id = match.group(1).strip()
+            if not item_id:
+                continue
+            formatted_items.append(text)
+
+        return "\n".join(formatted_items)
+
+    def _wardrobe_search(self, query: str) -> str:
+        """在用户数字衣橱中检索相关单品。
+
+        优化点:
+        1. 根据query复杂度动态调整k值(5-15)
+        2. 如果结果>8条,进行智能压缩以减少上下文污染
+        3. 格式化返回结果，确保ID部分清晰易提取
 
         参数:
             query: 用户的自然语言查询，如"适合面试的外套"、"黑色裤子"
@@ -494,10 +608,36 @@ class RagService(object):
             return "衣橱检索服务不可用，请提示用户先去「智能衣橱」录入单品。"
 
         try:
-            top_texts = self.vector_wardrobe.search(query, k=15)
+            # Step 1: 根据query复杂度动态估算Top-K
+            k = self._estimate_topk(query)
+
+            # Step 2: 检索
+            top_texts = self.vector_wardrobe.search(query, k=k)
             if not top_texts:
                 return "衣橱中暂无相关单品，建议用户先去「智能衣橱」录入或推荐购入单品。"
-            return "\n".join(top_texts)
+
+            # 【调试日志】打印原始检索结果的前3条
+            print(f"[DEBUG] wardrobe_search 原始返回（前3条）：", flush=True)
+            for i, text in enumerate(top_texts[:3]):
+                print(f"  [{i+1}] {text}", flush=True)
+
+            # Step 3: 如果结果过多,智能压缩以减少上下文膨胀
+            if len(top_texts) > 8:
+                compressed = self._compress_wardrobe_results(query, top_texts)
+            else:
+                compressed = "\n".join(top_texts)
+
+            # Step 4: 格式化结果，确保 ID 清晰；如果全部结果都是旧格式，
+            # 返回明确的空结果提示，避免模型凭空编造卡片 ID。
+            formatted = self._format_wardrobe_for_llm(compressed.split("\n"))
+            if not formatted:
+                print("[WARN] 衣橱检索结果全部缺少真实 ID，已阻止模型使用旧格式数据", flush=True)
+                return "衣橱中暂无可用于卡片推荐的有效单品，请提示用户稍后重试。"
+
+            # 【调试日志】打印最终发给 AI 的内容
+            print(f"[DEBUG] wardrobe_search 最终返回给 AI：\n{formatted[:500]}", flush=True)
+
+            return formatted
         except Exception as exc:
             print(f"[WARN] 衣橱检索失败：{exc}", flush=True)
             return "衣橱检索暂时不可用。"

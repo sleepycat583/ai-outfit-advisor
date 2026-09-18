@@ -1,9 +1,21 @@
+"""知识库与衣橱向量检索服务。
+
+衣橱向量索引依赖 Supabase 中的原始单品数据，并向 RAG 服务提供带真实单品 ID 的检索文本。
+"""
+
 import os
+import re
 import time
 
 from langchain_chroma import Chroma
 from config import base as config
 from config.supabase import get_supabase_client
+
+
+# 衣橱索引的文本格式一旦变化，旧 Chroma 文档不会自动更新。
+# 使用版本化 collection 名称，让格式升级能够触发一次安全重建，而不是继续读取旧数据。
+WARDROBE_COLLECTION_NAME = "wardrobe_items_v2"
+WARDROBE_ITEM_ID_PATTERN = re.compile(r"(?:^|\s)-?\s*id:([^\s]+)")
 
 
 class VectorStoreService(object):
@@ -34,6 +46,9 @@ class VectorWardrobeService:
     """管理衣橱单品的向量索引（独立 Chroma Collection），用于语义检索 Top-K 单品。
 
     容器重启后自动从 Supabase wardrobe_items 表重建向量索引。
+
+    衣橱索引使用独立版本名。这样可以避免旧版本只保存描述、不保存真实单品 ID
+    时继续被检索出来，导致前端无法根据 ID 渲染卡片。
     """
 
     def __init__(self, embedding, user_id: str = ""):
@@ -46,7 +61,7 @@ class VectorWardrobeService:
         persist_directory = os.path.join(config.persist_directory, user_id, "wardrobe") if user_id else os.path.join(config.persist_directory, "wardrobe")
         os.makedirs(persist_directory, exist_ok=True)
         self.vector_store = Chroma(
-            collection_name="wardrobe_items",
+            collection_name=WARDROBE_COLLECTION_NAME,
             embedding_function=self.embedding,
             persist_directory=persist_directory,
         )
@@ -139,11 +154,33 @@ class VectorWardrobeService:
             self.vector_store.delete(ids=existing["ids"])
 
     def search(self, query: str, k: int = 15) -> list[str]:
-        """语义检索最相关的 Top-K 单品描述文本，并打印检索耗时。"""
+        """语义检索最相关的 Top-K 单品描述文本，并打印检索耗时。
+
+        返回值中的每条文本必须包含真实的 `id:`。这是模型生成 `<item>...</item>`
+        卡片标记的唯一可靠来源；不符合当前格式的旧文档会被丢弃并记录日志。
+        """
         start_time = time.time()
         docs = self.vector_store.similarity_search(query, k=k)
         print(f"[PERF] VectorWardrobeService.search took {time.time() - start_time:.3f}s", flush=True)
-        return [doc.page_content for doc in docs]
+        valid_texts = []
+        for doc in docs:
+            text = str(doc.page_content or "").strip()
+            metadata_item_id = str((doc.metadata or {}).get("item_id") or "").strip()
+            if WARDROBE_ITEM_ID_PATTERN.search(text):
+                valid_texts.append(text)
+                continue
+
+            # 旧文档可能有 metadata.item_id，但正文没有 id；补回标准前缀，
+            # 让一次运行也能容忍少量历史数据，真正的全量迁移仍由 v2 collection 完成。
+            if metadata_item_id:
+                repaired_text = f"- id:{metadata_item_id} {text}".strip()
+                valid_texts.append(repaired_text)
+                print(f"[WARN] 衣橱索引文档缺少 id，已使用 metadata.item_id 修复: {metadata_item_id}", flush=True)
+                continue
+
+            print(f"[WARN] 忽略无单品 ID 的衣橱索引文档: {text[:120]}", flush=True)
+
+        return valid_texts
 
 
 if __name__ == '__main__':

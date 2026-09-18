@@ -1,3 +1,8 @@
+"""Streamlit 穿搭问答与智能衣橱页面。
+
+本模块负责聊天消息、衣橱管理和推荐单品卡片渲染，依赖 RAG、Supabase 及图片缓存服务。
+"""
+
 import base64
 import os
 import re
@@ -17,6 +22,27 @@ from src.utils.image_cache import (
     reset_image_load_stats,
     log_image_load_stats,
 )
+
+
+CATEGORY_ICON = {
+    "外套": "🧥",
+    "内搭": "👕",
+    "下装": "👖",
+    "鞋履": "👟",
+    "配饰": "🧢",
+}
+
+
+def extract_wardrobe_item_ids(text: str) -> list[str]:
+    """提取 AI 回复中的衣橱单品 ID，并清理空白和重复标签。
+
+    参数:
+        text: AI 返回的完整消息文本。
+    返回值:
+        按原文顺序排列的去重 ID 列表，支持标签内容跨行或带空白。
+    """
+    item_ids = re.findall(r"<item>\s*([^<>]+?)\s*</item>", str(text or ""), flags=re.DOTALL)
+    return list(dict.fromkeys(item_id.strip() for item_id in item_ids if item_id.strip()))
 
 
 @st.cache_data(show_spinner=False, ttl=60)
@@ -122,20 +148,41 @@ def render_page():
 </div>"""
 
     def render_recommendations(item_ids, w_items):
-        """在文字下方以网格形式渲染推荐单品列表。"""
-        item_map = {item.get("id"): item for item in w_items}
+        """在文字下方以网格形式渲染推荐单品列表。
+
+        【改进点】
+        1. 更清晰的 ID 匹配日志，便于调试
+        2. 跳过无效单品时给出原因
+        3. 处理图片缺失的降级方案
+        """
+        item_map = {str(item.get("id")).strip(): item for item in w_items if item.get("id")}
+
+        # 【调试】打印衣橱中所有可用的 ID
+        available_ids = list(item_map.keys())
+        print(f"[DEBUG] 衣橱中的所有 ID：{available_ids}", flush=True)
+
         valid_items = []
         for iid in item_ids:
-            item = item_map.get(iid)
+            iid_clean = str(iid).strip() if iid else ""
+            if not iid_clean:
+                print(f"[DEBUG] 跳过空 ID", flush=True)
+                continue
+
+            item = item_map.get(iid_clean)
             if not item:
+                print(f"[DEBUG] ID '{iid_clean}' 在衣橱中不存在", flush=True)
                 continue
+
             image_path = item.get("image_path", "")
-            if not image_path:
-                continue
-            img_b64 = get_image_base64(image_path)
+            img_b64 = get_image_base64(image_path) if image_path else ""
             valid_items.append((item, img_b64))
+            if img_b64:
+                print(f"[DEBUG] ID '{iid_clean}' 成功加载图片", flush=True)
+            else:
+                print(f"[DEBUG] ID '{iid_clean}' 图片不可用，使用占位卡片", flush=True)
 
         if not valid_items:
+            print(f"[DEBUG] 没有可渲染的单品卡片", flush=True)
             return
 
         with st.container(border=True):
@@ -146,16 +193,29 @@ def render_page():
                 cols = st.columns(cols_per_row)
                 for col, (item, img_b64) in zip(cols, row_items):
                     with col:
-                        card_html = build_item_flex_card(item, img_b64)
+                        icon = CATEGORY_ICON.get(item.get("category", ""), "👗")
+                        card_html = (
+                            build_item_flex_card(item, img_b64)
+                            if img_b64
+                            else build_wardrobe_card_placeholder(item, icon)
+                        )
                         st.markdown(card_html, unsafe_allow_html=True)
 
 
     def render_message(text, w_items):
         """渲染完整消息：先渲染纯净文字，再在下方展示推荐单品网格。"""
-        item_ids = re.findall(r"<item>(.*?)</item>", text)
-        clean_text = re.sub(r"<item>.*?</item>", "", text).strip()
+        # 【改进】使用更灵活的正则表达式匹配 <item>ID</item> 标签
+        # 支持多种 ID 格式：UUID、简短 ID、数字组合等
+        item_ids = extract_wardrobe_item_ids(text)
+
+        # 移除所有 <item>...</item> 标签以获得干净的文本
+        clean_text = re.sub(r"\s*<item>[^<>]*</item>", "", text, flags=re.DOTALL).strip()
+
         st.markdown(clean_text)
+
         if item_ids:
+            # 【改进】添加调试日志（开发时可用）
+            print(f"[DEBUG] 提取到的卡片 ID：{item_ids}", flush=True)
             render_recommendations(item_ids, w_items)
 
 
@@ -620,7 +680,7 @@ def render_page():
                         status.update(label="⚠️ 小衣思考超时，请稍后再试", state="error", expanded=False)
 
                 placeholder = st.empty()
-                clean_res = re.sub(r"<item>.*?</item>", "", res)
+                clean_res = re.sub(r"<item>.*?</item>", "", res, flags=re.DOTALL)
                 placeholder.write_stream(typewriter_stream([clean_res]))
                 placeholder.empty()
                 render_message(res, wardrobe_items)
@@ -802,13 +862,7 @@ def render_page():
         if not items:
             st.info("还没有衣物记录，先上传一张照片吧。")
         else:
-            icon_map = {
-                "外套": "🧥",
-                "内搭": "👕",
-                "下装": "👖",
-                "鞋履": "👟",
-                "配饰": "🧢",
-            }
+            icon_map = CATEGORY_ICON
             category_order = ["外套", "内搭", "下装", "鞋履", "配饰"]
 
             # ===== 筛选区 =====
