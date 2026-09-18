@@ -35,7 +35,42 @@ class VectorStoreService(object):
             embedding_function=self.embedding,
             persist_directory=persist_dir,
         )
+
+        # 容器重启后自动重建知识库索引
+        if self._is_empty():
+            self._rebuild_knowledge_base()
+
         print(f"[PERF] VectorStoreService.__init__ took {time.time() - start_time:.3f}s", flush=True)
+
+    def _is_empty(self) -> bool:
+        """检查知识库向量索引是否为空（容器重启检测）。"""
+        try:
+            result = self.vector_store.get(limit=1)
+            return len(result.get("ids", [])) == 0
+        except Exception:
+            return True
+
+    def _rebuild_knowledge_base(self) -> None:
+        """容器重启时从种子和 Supabase 重建知识库索引。
+
+        复用 KnowledgeBaseService 的导入逻辑，通过临时实例化触发恢复。
+        KnowledgeBaseService.__init__ 会自动执行 _rebuild_index()，
+        包含种子导入和 Supabase 用户文档恢复。
+        """
+        try:
+            # 懒加载导入，避免循环依赖
+            from src.services.knowledge_base import KnowledgeBaseService
+
+            # 临时创建 KnowledgeBaseService 实例执行恢复
+            # 传入相同的 user_id，确保访问同一个 collection
+            # username 设为 None，恢复时不需要用户名
+            KnowledgeBaseService(
+                user_id=self.user_id,
+                username=None
+            )
+            print(f"[知识库恢复] 已自动初始化知识库索引", flush=True)
+        except Exception as exc:
+            print(f"[WARN] 知识库自动恢复失败，将继续使用空索引: {exc}", flush=True)
 
     def get_retriever(self):
         """返回向量库检索器，方便加入 Chain"""
