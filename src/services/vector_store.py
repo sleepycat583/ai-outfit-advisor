@@ -3,6 +3,7 @@ import time
 
 from langchain_chroma import Chroma
 from config import base as config
+from config.supabase import get_supabase_client
 
 
 class VectorStoreService(object):
@@ -30,13 +31,18 @@ class VectorStoreService(object):
 
 
 class VectorWardrobeService:
-    """管理衣橱单品的向量索引（独立 Chroma Collection），用于语义检索 Top-K 单品。"""
+    """管理衣橱单品的向量索引（独立 Chroma Collection），用于语义检索 Top-K 单品。
+
+    容器重启后自动从 Supabase wardrobe_items 表重建向量索引。
+    """
 
     def __init__(self, embedding, user_id: str = ""):
-        """初始化衣橱向量服务，并打印 Chroma 连接初始化耗时。"""
+        """初始化衣橱向量服务，并在索引为空时自动从 Supabase 重建。"""
         start_time = time.time()
         self.embedding = embedding
         self.user_id = user_id
+        self.supabase = get_supabase_client()
+
         persist_directory = os.path.join(config.persist_directory, user_id, "wardrobe") if user_id else os.path.join(config.persist_directory, "wardrobe")
         os.makedirs(persist_directory, exist_ok=True)
         self.vector_store = Chroma(
@@ -44,7 +50,65 @@ class VectorWardrobeService:
             embedding_function=self.embedding,
             persist_directory=persist_directory,
         )
+
+        # 容器重启后自动重建向量索引
+        if self._is_empty():
+            self._rebuild_from_supabase()
+
         print(f"[PERF] VectorWardrobeService.__init__ took {time.time() - start_time:.3f}s", flush=True)
+
+    def _is_empty(self) -> bool:
+        """检查向量库是否为空（容器重启检测）。"""
+        try:
+            result = self.vector_store.get(limit=1)
+            return len(result.get("ids", [])) == 0
+        except Exception:
+            return True
+
+    def _rebuild_from_supabase(self) -> None:
+        """从 Supabase wardrobe_items 表重建向量索引。
+
+        容器重启后,本地 Chroma 向量库会丢失,但 Supabase 中仍保留原始单品数据。
+        此方法读取用户的所有衣橱单品,重新生成 embedding 并写入 Chroma。
+        """
+        if not self.user_id:
+            return
+
+        try:
+            result = (
+                self.supabase.table("wardrobe_items")
+                .select("*")
+                .eq("user_id", self.user_id)
+                .execute()
+            )
+        except Exception as exc:
+            print(f"[WARN] 衣橱向量重建失败,Supabase 查询异常: {exc}", flush=True)
+            return
+
+        if not result.data:
+            return
+
+        items_to_add = []
+        for row in result.data:
+            item_text = self._row_to_text(row)
+            items_to_add.append((row["id"], item_text))
+
+        if items_to_add:
+            self.add_items(items_to_add)
+            print(f"[衣橱恢复] 已从云端重建 {len(items_to_add)} 件单品的向量索引", flush=True)
+
+    def _row_to_text(self, row: dict) -> str:
+        """将 Supabase wardrobe_items 行转为向量索引文本。
+
+        格式与 wardrobe.py 中的 _item_to_text 保持一致。
+        """
+        item_id = row.get("id", "")
+        category = row.get("category", "")
+        sub_category = row.get("sub_category", "")
+        color = row.get("color", "")
+        material = row.get("material", "")
+        season = row.get("season", "")
+        return f"- id:{item_id} 类别:{category}/{sub_category} 颜色:{color} 材质:{material} 适季:{season}"
 
     def add_items(self, items: list[tuple[str, str]]) -> None:
         """批量添加单品文本到向量库。items 为 [(item_id, text), ...] 列表。"""
