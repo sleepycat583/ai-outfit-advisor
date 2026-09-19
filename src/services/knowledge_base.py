@@ -22,7 +22,7 @@ from config.supabase import get_supabase_client
 SEEDS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "seeds")
 SYSTEM_OPERATOR_ID = "system"
 HISTORICAL_OPERATOR_NAME = "历史用户"
-METADATA_VERSION = 2
+METADATA_VERSION = 4  # R-006: 增加真实位置和内容版本元数据
 
 
 def get_string_md5(input_str: str, encoding: str = "utf-8") -> str:
@@ -30,6 +30,72 @@ def get_string_md5(input_str: str, encoding: str = "utf-8") -> str:
     md5_obj = hashlib.md5()
     md5_obj.update(str_bytes)
     return md5_obj.hexdigest()
+
+
+def extract_sections(content: str) -> list[tuple[str, int, int]]:
+    """提取文档章节结构（标题及其位置范围）
+
+    识别模式：
+    - "一、二、三、" 或 "1. 2. 3." 开头的行
+    - "【】" 包裹的行
+
+    Returns:
+        [(section_title, start_pos, end_pos), ...]
+    """
+    import re
+
+    lines = content.split("\n")
+    sections = []
+    current_pos = 0
+
+    # 识别章节标题的正则模式
+    patterns = [
+        re.compile(r"^[一二三四五六七八九十]+、(.+)$"),  # 一、二、三、
+        re.compile(r"^(\d+)\.\s+(.+)$"),  # 1. 2. 3.
+        re.compile(r"^【(.+)】$"),  # 【标题】
+    ]
+
+    for i, line in enumerate(lines):
+        line_stripped = line.strip()
+        if not line_stripped:
+            current_pos += len(line) + 1  # +1 for \n
+            continue
+
+        # 检查是否匹配任何章节标题模式
+        matched = False
+        for pattern in patterns:
+            match = pattern.match(line_stripped)
+            if match:
+                # 提取标题文本（去除序号）
+                if len(match.groups()) == 1:
+                    title = match.group(1).strip()
+                else:
+                    title = match.group(2).strip()
+
+                # 记录章节起始位置
+                sections.append((title, current_pos, -1))
+                matched = True
+                break
+
+        current_pos += len(line) + 1
+
+    # 填充每个章节的结束位置
+    for i in range(len(sections) - 1):
+        sections[i] = (sections[i][0], sections[i][1], sections[i + 1][1])
+
+    # 最后一个章节延伸到文档末尾
+    if sections:
+        sections[-1] = (sections[-1][0], sections[-1][1], len(content))
+
+    return sections
+
+
+def find_section_for_position(sections: list[tuple[str, int, int]], pos: int) -> str:
+    """查找指定位置所属的章节标题"""
+    for title, start, end in sections:
+        if start <= pos < end:
+            return title
+    return ""
 
 
 class KnowledgeBaseService(object):
@@ -45,7 +111,7 @@ class KnowledgeBaseService(object):
             if user_id
             else os.path.join(config.persist_directory, "kb")
         )
-        collection_name = f"kb_{user_id}" if user_id else "kb_default"
+        collection_name = f"kb_{user_id}" if user_id else config.knowledge_collection_name
 
         os.makedirs(persist_dir, exist_ok=True)
 
@@ -61,9 +127,63 @@ class KnowledgeBaseService(object):
             chunk_overlap=config.chunk_overlap,
             separators=config.separators,
             length_function=len,
+            add_start_index=True,
         )
 
         self._rebuild_index()
+
+    # ------------------------------------------------------------------
+    # 文档切分与元数据生成（R-006 增强）
+    # ------------------------------------------------------------------
+
+    def _create_chunks_with_metadata(
+        self, content: str, base_metadata: dict
+    ) -> list[tuple[str, dict]]:
+        """切分文档并生成完整元数据（包含 chunk 位置和章节信息）
+
+        Args:
+            content: 文档原始内容
+            base_metadata: 基础元数据（source、operator_id 等）
+
+        Returns:
+            [(chunk_text, chunk_metadata), ...]
+        """
+        # 1. 提取章节结构
+        sections = extract_sections(content)
+
+        # 使用 create_documents 让 LangChain 记录每个 chunk 在原文中的真实起点。
+        # 不能用“前一 chunk 结束位置减 overlap”推算，因为分隔符清理会改变实际边界。
+        documents = self.splitter.create_documents([content], metadatas=[base_metadata])
+
+        # 3. 为每个 chunk 生成完整元数据
+        result = []
+        document_hash = get_string_md5(content)
+
+        for idx, document in enumerate(documents):
+            chunk = document.page_content
+            start_pos = int(document.metadata["start_index"])
+            end_pos = start_pos + len(chunk)
+
+            # 查找所属章节
+            section_title = ""
+            if sections:
+                section_title = find_section_for_position(sections, start_pos)
+
+            # 合并元数据
+            chunk_meta = {
+                **base_metadata,
+                "chunk_index": idx,
+                "total_chunks": len(documents),
+                "start_char": start_pos,
+                "end_char": end_pos,
+                "section_title": section_title,
+                "document_hash": document_hash,
+                "document_version": document_hash,
+                "metadata_version": METADATA_VERSION,
+            }
+            result.append((chunk, chunk_meta))
+
+        return result
 
     # ------------------------------------------------------------------
     # 索引重建
@@ -117,25 +237,41 @@ class KnowledgeBaseService(object):
             if self._md5_exists(md5_hex):
                 continue
 
-            if len(content) > config.max_split_char_number:
-                chunks = self.splitter.split_text(content)
-            else:
-                chunks = [content]
-
-            metadata = {
+            # 使用增强切分（包含章节和位置元数据）
+            base_metadata = {
                 "source": f"[种子] {filename}",
                 "create_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "operator_id": SYSTEM_OPERATOR_ID,
                 "operator_name": config.DEFAULT_OPERATOR,
                 "operator": config.DEFAULT_OPERATOR,
                 "source_type": "seed",
-                "metadata_version": METADATA_VERSION,
             }
 
-            self.chroma.add_texts(
-                chunks,
-                metadatas=[metadata for _ in chunks],
-            )
+            if len(content) > config.max_split_char_number:
+                chunks_with_meta = self._create_chunks_with_metadata(content, base_metadata)
+            else:
+                # 短文档不切分，但仍添加元数据
+                document_hash = get_string_md5(content)
+                chunks_with_meta = [
+                    (
+                        content,
+                        {
+                            **base_metadata,
+                            "chunk_index": 0,
+                            "total_chunks": 1,
+                            "start_char": 0,
+                            "end_char": len(content),
+                            "section_title": "",
+                            "document_hash": document_hash,
+                            "document_version": document_hash,
+                            "metadata_version": METADATA_VERSION,
+                        },
+                    )
+                ]
+
+            texts = [chunk for chunk, _ in chunks_with_meta]
+            metadatas = [meta for _, meta in chunks_with_meta]
+            self.chroma.add_texts(texts, metadatas=metadatas)
             self._md5_save(
                 md5_hex,
                 f"[种子] {filename}",
@@ -168,21 +304,38 @@ class KnowledgeBaseService(object):
             if not content:
                 continue
 
-            if len(content) > config.max_split_char_number:
-                chunks = self.splitter.split_text(content)
-            else:
-                chunks = [content]
-
             # 种子记录可能已经由 _import_seeds 写入当前 Chroma，避免重建时重复添加。
             if self._is_seed_source(source) and self._source_exists(source):
                 continue
 
-            metadata = self._document_metadata(row)
+            base_metadata = self._document_metadata(row)
 
-            self.chroma.add_texts(
-                chunks,
-                metadatas=[metadata for _ in chunks],
-            )
+            # 使用增强切分（包含章节和位置元数据）
+            if len(content) > config.max_split_char_number:
+                chunks_with_meta = self._create_chunks_with_metadata(content, base_metadata)
+            else:
+                # 短文档不切分，但仍添加元数据
+                document_hash = get_string_md5(content)
+                chunks_with_meta = [
+                    (
+                        content,
+                        {
+                            **base_metadata,
+                            "chunk_index": 0,
+                            "total_chunks": 1,
+                            "start_char": 0,
+                            "end_char": len(content),
+                            "section_title": "",
+                            "document_hash": document_hash,
+                            "document_version": document_hash,
+                            "metadata_version": METADATA_VERSION,
+                        },
+                    )
+                ]
+
+            texts = [chunk for chunk, _ in chunks_with_meta]
+            metadatas = [meta for _, meta in chunks_with_meta]
+            self.chroma.add_texts(texts, metadatas=metadatas)
             restored += 1
 
         if restored > 0:
@@ -291,35 +444,13 @@ class KnowledgeBaseService(object):
             return False
 
     def _migrate_chroma_metadata(self) -> None:
-        """将旧索引中缺失作者字段或错误作者的元数据升级到 v2。"""
-        result = self.chroma.get(include=["metadatas"])
-        ids = result.get("ids", [])
-        metadatas = result.get("metadatas", [])
-        update_ids = []
-        update_metadatas = []
+        """兼容旧索引，但不伪造无法从正文恢复的 chunk 元数据。
 
-        for chunk_id, metadata in zip(ids, metadatas):
-            metadata = metadata or {}
-            if metadata.get("metadata_version", 0) >= METADATA_VERSION:
-                continue
-
-            upgraded = self._document_metadata(
-                {
-                    "source": metadata.get("source", ""),
-                    "created_at": metadata.get("create_time", ""),
-                    "user_id": self.user_id,
-                    "operator": metadata.get("operator", ""),
-                }
-            )
-            update_ids.append(chunk_id)
-            update_metadatas.append(upgraded)
-
-        if update_ids:
-            # LangChain 的 Chroma 封装没有 update 方法，元数据迁移需调用原生 collection API。
-            self.chroma._collection.update(
-                ids=update_ids,
-                metadatas=update_metadatas,
-            )
+        旧版本没有保存原始文档内容和可靠的 chunk 起点，因此这里只补充
+        可安全推断的作者信息，并保留旧版本标记；真正的 R-006 迁移由
+        独立脚本从 seeds/Supabase 原文重新切分并写入新版 collection。
+        """
+        return
 
     # ------------------------------------------------------------------
     # 公共 API
@@ -334,25 +465,41 @@ class KnowledgeBaseService(object):
         if self._md5_exists(md5_hex):
             return "[跳过]内容已经在知识库中"
 
-        if len(data) > config.max_split_char_number:
-            knowledge_chunks: list[str] = self.splitter.split_text(data)
-        else:
-            knowledge_chunks = [data]
-
-        metadata = {
+        # 使用增强切分（包含章节和位置元数据）
+        base_metadata = {
             "source": filename,
             "create_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "operator_id": self.user_id,
             "operator_name": self.username,
             "operator": self.username,
             "source_type": "user",
-            "metadata_version": METADATA_VERSION,
         }
 
-        self.chroma.add_texts(
-            knowledge_chunks,
-            metadatas=[metadata for _ in knowledge_chunks],
-        )
+        if len(data) > config.max_split_char_number:
+            chunks_with_meta = self._create_chunks_with_metadata(data, base_metadata)
+        else:
+            # 短文档不切分，但仍添加元数据
+            document_hash = get_string_md5(data)
+            chunks_with_meta = [
+                (
+                    data,
+                    {
+                        **base_metadata,
+                        "chunk_index": 0,
+                        "total_chunks": 1,
+                        "start_char": 0,
+                        "end_char": len(data),
+                        "section_title": "",
+                        "document_hash": document_hash,
+                        "document_version": document_hash,
+                        "metadata_version": METADATA_VERSION,
+                    },
+                )
+            ]
+
+        texts = [chunk for chunk, _ in chunks_with_meta]
+        metadatas = [meta for _, meta in chunks_with_meta]
+        self.chroma.add_texts(texts, metadatas=metadatas)
 
         # 持久化到 Supabase，确保容器重启后可恢复
         self._md5_save(

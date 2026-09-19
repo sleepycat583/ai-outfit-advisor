@@ -25,11 +25,14 @@ DEFAULT_OPERATOR = "小曹"
 
 # Chroma 向量库配置
 persist_directory = "./data/chroma"
+# 默认知识库索引版本。旧 kb_default 保留作为回滚副本，不再被新代码读取。
+knowledge_collection_name = "kb_default_r006"
 
 # 文本切分配置
 chunk_size = 800
-chunk_overlap = 0
-separators = ["\n\n", "\n", " ", ""]
+chunk_overlap = 100  # R-006: 增加重叠以保持跨 chunk 上下文连续性
+# 以字符级切分保证每个相邻 chunk 都实际保留 overlap；章节归属由 metadata 单独记录。
+separators = [""]
 
 # 超过该字符数才进行切分（避免短文本不必要的切分）
 max_split_char_number = 1000

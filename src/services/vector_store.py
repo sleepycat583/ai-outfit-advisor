@@ -27,7 +27,7 @@ class VectorStoreService(object):
         self.user_id = user_id
 
         persist_dir = os.path.join(config.persist_directory, user_id, "kb") if user_id else os.path.join(config.persist_directory, "kb")
-        collection_name = f"kb_{user_id}" if user_id else "kb_default"
+        collection_name = f"kb_{user_id}" if user_id else config.knowledge_collection_name
 
         os.makedirs(persist_dir, exist_ok=True)
 
