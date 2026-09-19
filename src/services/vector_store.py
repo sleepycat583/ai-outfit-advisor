@@ -14,7 +14,8 @@ from config.supabase import get_supabase_client
 
 # 衣橱索引的文本格式一旦变化，旧 Chroma 文档不会自动更新。
 # 使用版本化 collection 名称，让格式升级能够触发一次安全重建，而不是继续读取旧数据。
-WARDROBE_COLLECTION_NAME = "wardrobe_items_v2"
+# v3: embedding 文本不含 UUID（减少噪音），metadata 保存完整 original_text（保证返回给 LLM 的文本包含 id:）
+WARDROBE_COLLECTION_NAME = "wardrobe_items_v3"
 WARDROBE_ITEM_ID_PATTERN = re.compile(r"(?:^|\s)-?\s*id:([^\s]+)")
 
 
@@ -161,13 +162,32 @@ class VectorWardrobeService:
         return f"- id:{item_id} 类别:{category}/{sub_category} 颜色:{color} 材质:{material} 适季:{season}"
 
     def add_items(self, items: list[tuple[str, str]]) -> None:
-        """批量添加单品文本到向量库。items 为 [(item_id, text), ...] 列表。"""
+        """批量添加单品文本到向量库。items 为 [(item_id, text), ...] 列表。
+
+        优化点（v3）：
+        - embedding 文本不包含 UUID（避免无意义噪音，提升语义相似度）
+        - metadata 保存完整 original_text，用于检索时重建返回文本
+        - 保证返回给 LLM 的文本包含 id:UUID，确保前端卡片渲染
+        """
         if not items:
             return
+
         ids, texts = zip(*items)
+
+        # 构造 embedding 文本：移除 "- id:UUID " 前缀，只保留语义相关部分
+        embedding_texts = []
+        for text in texts:
+            # 移除 "- id:UUID " 部分，保留 "类别:xx 颜色:xx ..." 语义文本
+            clean_text = re.sub(r"^-?\s*id:[^\s]+\s+", "", text.strip())
+            embedding_texts.append(clean_text)
+
+        # metadata 保存完整原始文本，用于检索时重建
         self.vector_store.add_texts(
-            texts=list(texts),
-            metadatas=[{"item_id": iid} for iid in ids],
+            texts=embedding_texts,  # 用于 embedding 的文本（无UUID噪音）
+            metadatas=[{
+                "item_id": iid,
+                "original_text": text  # 保存完整文本（包含 id:）
+            } for iid, text in zip(ids, texts)],
             ids=list(ids),
         )
 
@@ -191,29 +211,52 @@ class VectorWardrobeService:
     def search(self, query: str, k: int = 15) -> list[str]:
         """语义检索最相关的 Top-K 单品描述文本，并打印检索耗时。
 
-        返回值中的每条文本必须包含真实的 `id:`。这是模型生成 `<item>...</item>`
-        卡片标记的唯一可靠来源；不符合当前格式的旧文档会被丢弃并记录日志。
+        返回值中的每条文本必须包含真实的 `id:`，供 LLM 提取用于前端卡片渲染。
+
+        v3 优化：
+        - embedding 计算时不含 UUID（提升语义相似度）
+        - 返回文本从 metadata.original_text 重建（包含 id:UUID）
+        - 兼容旧版本数据（v2：从 metadata.item_id 重建）
         """
         start_time = time.time()
         docs = self.vector_store.similarity_search(query, k=k)
         print(f"[PERF] VectorWardrobeService.search took {time.time() - start_time:.3f}s", flush=True)
+
         valid_texts = []
         for doc in docs:
+            metadata = doc.metadata or {}
+
+            # v3 新版本：优先使用 original_text（已包含 id:）
+            if "original_text" in metadata:
+                original_text = str(metadata["original_text"]).strip()
+                if original_text:
+                    valid_texts.append(original_text)
+                    continue
+
+            # v2 兼容：从 metadata.item_id 重建完整文本
+            metadata_item_id = str(metadata.get("item_id") or "").strip()
+            if metadata_item_id:
+                # page_content 是无 UUID 的语义文本（v3）或完整文本（v2）
+                text = str(doc.page_content or "").strip()
+
+                # 检查 page_content 是否已包含 id:（v2 旧数据）
+                if WARDROBE_ITEM_ID_PATTERN.search(text):
+                    valid_texts.append(text)
+                    continue
+
+                # v3 或缺失 id: 的情况，从 metadata.item_id 重建
+                repaired_text = f"- id:{metadata_item_id} {text}"
+                valid_texts.append(repaired_text)
+                print(f"[WARN] 使用 metadata.item_id 重建文本: {metadata_item_id}", flush=True)
+                continue
+
+            # 兜底：尝试从 page_content 直接提取（极少数异常数据）
             text = str(doc.page_content or "").strip()
-            metadata_item_id = str((doc.metadata or {}).get("item_id") or "").strip()
             if WARDROBE_ITEM_ID_PATTERN.search(text):
                 valid_texts.append(text)
                 continue
 
-            # 旧文档可能有 metadata.item_id，但正文没有 id；补回标准前缀，
-            # 让一次运行也能容忍少量历史数据，真正的全量迁移仍由 v2 collection 完成。
-            if metadata_item_id:
-                repaired_text = f"- id:{metadata_item_id} {text}".strip()
-                valid_texts.append(repaired_text)
-                print(f"[WARN] 衣橱索引文档缺少 id，已使用 metadata.item_id 修复: {metadata_item_id}", flush=True)
-                continue
-
-            print(f"[WARN] 忽略无单品 ID 的衣橱索引文档: {text[:120]}", flush=True)
+            print(f"[WARN] 忽略无单品 ID 的衣橱索引文档", flush=True)
 
         return valid_texts
 

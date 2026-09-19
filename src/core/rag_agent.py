@@ -173,12 +173,38 @@ class ConsoleLoggingHandler(BaseCallbackHandler):
 
 
 class RagService(object):
-    def __init__(self, vector_wardrobe: Optional[VectorWardrobeService] = None, user_id: str = ""):
-        """初始化 RAG 服务，并打印模型、向量库、LangGraph 组装耗时。"""
+    def __init__(
+        self,
+        vector_wardrobe: Optional[VectorWardrobeService] = None,
+        user_id: str = "",
+        enable_hybrid_retrieval: bool = True
+    ):
+        """初始化 RAG 服务，并打印模型、向量库、LangGraph 组装耗时。
+
+        参数:
+            vector_wardrobe: 向量衣橱服务（可选）
+            user_id: 用户 ID
+            enable_hybrid_retrieval: 是否启用混合检索（R-004优化，默认True）
+        """
         start_time = time.time()
         self.vector_wardrobe = vector_wardrobe
         self.user_id = user_id
+        self.enable_hybrid_retrieval = enable_hybrid_retrieval
         self.weather_service = WeatherService(supabase_client=get_supabase_client())
+
+        # 初始化混合检索器（如果启用且衣橱服务可用）
+        self.hybrid_retriever = None
+        if enable_hybrid_retrieval and vector_wardrobe and user_id:
+            try:
+                from src.services.hybrid_wardrobe_retriever import HybridWardrobeRetriever
+                self.hybrid_retriever = HybridWardrobeRetriever(
+                    user_id=user_id,
+                    vector_service=vector_wardrobe,
+                    enable_structural_filter=True
+                )
+                print("[INFO] 混合检索器已启用（结构化过滤 + 语义排序）", flush=True)
+            except Exception as exc:
+                print(f"[WARN] 混合检索器初始化失败，回退到纯语义检索: {exc}", flush=True)
 
         self.vector_service = VectorStoreService(
             embedding=DashScopeEmbeddings(model=config.EMBEDDING_MODEL_NAME),
@@ -602,10 +628,12 @@ class RagService(object):
     def _wardrobe_search(self, query: str) -> str:
         """在用户数字衣橱中检索相关单品。
 
-        优化点:
-        1. 根据query复杂度动态调整k值(5-15)
-        2. 如果结果>8条,进行智能压缩以减少上下文污染
-        3. 格式化返回结果，确保ID部分清晰易提取
+        优化点（R-004）:
+        1. 优先使用混合检索器（结构化过滤 + 语义排序）
+        2. 回退到纯语义检索（兼容旧版本和异常场景）
+        3. 根据query复杂度动态调整k值(5-15)
+        4. 如果结果>8条,进行智能压缩以减少上下文污染
+        5. 格式化返回结果，确保ID部分清晰易提取
 
         参数:
             query: 用户的自然语言查询，如"适合面试的外套"、"黑色裤子"
@@ -619,8 +647,13 @@ class RagService(object):
             # Step 1: 根据query复杂度动态估算Top-K
             k = self._estimate_topk(query)
 
-            # Step 2: 检索
-            top_texts = self.vector_wardrobe.search(query, k=k)
+            # Step 2: 检索（优先使用混合检索器）
+            if self.hybrid_retriever:
+                print(f"[INFO] 使用混合检索器（结构化过滤 + 语义排序），k={k}", flush=True)
+                top_texts = self.hybrid_retriever.search(query, k=k)
+            else:
+                print(f"[INFO] 使用纯语义检索（混合检索器不可用），k={k}", flush=True)
+                top_texts = self.vector_wardrobe.search(query, k=k)
             if not top_texts:
                 return "衣橱中暂无相关单品，建议用户先去「智能衣橱」录入或推荐购入单品。"
 
