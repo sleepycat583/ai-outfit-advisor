@@ -22,7 +22,7 @@ from src.core.rag_agent import RagService
 from config import base as config
 
 
-def test_query(service: RagService, query: str):
+def run_query(service: RagService, query: str):
     """测试单个查询"""
     print(f"\n{'=' * 60}")
     print(f"查询: {query}")
@@ -98,7 +98,7 @@ def main():
     results = []
     for query, description in test_queries:
         print(f"\n📋 测试场景: {description}")
-        success = test_query(service, query)
+        success = run_query(service, query)
         results.append((description, success))
 
     # 生成报告

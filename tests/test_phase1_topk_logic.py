@@ -4,13 +4,8 @@ Phase 1 Top-K估算逻辑单元测试
 """
 
 import sys
-import io
-from pathlib import Path
 
-# 修复Windows控制台编码
-if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+from pathlib import Path
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent
