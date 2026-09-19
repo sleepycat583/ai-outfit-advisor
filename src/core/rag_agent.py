@@ -10,12 +10,13 @@ import copy
 import json
 import re
 import time
+from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_core.tools import Tool, create_retriever_tool
+from langchain_core.tools import Tool
 from src.repositories.chat_history import FileChatMessageHistory
 from src.services.vector_store import VectorStoreService, VectorWardrobeService
 from src.core.prompts import RAG_SYSTEM_PROMPT, WEEKLY_PLAN_PROMPT
@@ -24,6 +25,86 @@ from config import base as config
 from langchain_community.chat_models.tongyi import ChatTongyi
 from src.services.weather import WeatherService
 from config.supabase import get_supabase_client
+
+
+def estimate_knowledge_k(query: str) -> int:
+    """根据查询类型估算知识库检索的 Top-K 数量（独立函数，供测试和生产使用）。
+
+    规则:
+    - 具体操作问题（洗涤、保养、尺码）: k=2
+      示例: "羊毛衫怎么洗", "如何保养皮鞋", "尺码偏小怎么选"
+    - 搭配类问题（颜色、单品组合）: k=4
+      示例: "黑色和米色怎么搭配", "衬衫和裤子如何组合"
+    - 宽泛概念问题（风格、原则、注意事项）: k=5
+      示例: "面试穿搭注意事项", "如何提升穿搭品味", "配色原则"
+    - 默认中等值: k=3
+
+    参数:
+        query: 用户查询文本
+
+    返回:
+        建议的 Top-K 数量（2-5）
+    """
+    # 具体操作类问题（洗涤、保养、尺码）
+    specific_keywords = ["怎么洗", "如何洗", "洗涤", "如何保养", "保养", "尺码", "缩水", "褪色", "起球", "晾晒"]
+    if any(kw in query for kw in specific_keywords):
+        return 2
+
+    # 宽泛概念类问题（风格、原则、注意事项）
+    broad_keywords = ["注意事项", "禁忌", "原则", "技巧", "如何提升", "怎么选", "什么风格", "穿搭建议"]
+    if any(kw in query for kw in broad_keywords):
+        return 5
+
+    # 搭配类问题（颜色、单品组合）
+    match_keywords = ["搭配", "配色", "组合", "怎么配", "如何配"]
+    if any(kw in query for kw in match_keywords):
+        return 4
+
+    # 默认中等值
+    return 3
+
+
+@dataclass(frozen=True)
+class KnowledgeRetrievalResult:
+    """知识库检索的结构化结果，供业务格式化和测试共同使用。"""
+
+    status: str
+    documents: list
+    top_similarity: float | None
+    requested_k: int
+
+
+def get_vector_distance_metric(vector_store) -> str:
+    """读取 Chroma Collection 的距离类型，避免依赖隐含默认值。
+
+    参数:
+        vector_store: LangChain Chroma 实例。
+
+    返回:
+        `cosine`、`l2` 或 `ip`。无法识别时返回 `unknown`，由调用方安全降级。
+    """
+    collection = getattr(vector_store, "_collection", None)
+    configuration = getattr(collection, "configuration", None) or {}
+    hnsw = configuration.get("hnsw") or {}
+    spann = configuration.get("spann") or {}
+    return str(hnsw.get("space") or spann.get("space") or "unknown").lower()
+
+
+def normalize_vector_distance(distance: float, metric: str) -> float:
+    """将 Chroma 原始距离归一化为 0-1 的相关度分数。
+
+    Chroma 的 `l2` 返回平方 L2 距离；当前 DashScope 向量是单位向量，
+    因此平方 L2 距离与余弦距离的关系为 `distance / 2`。未知度量不猜测，
+    直接抛错，避免把错误分数静默注入回答。
+    """
+    distance = float(distance)
+    if metric == "cosine":
+        return max(0.0, min(1.0, 1.0 - distance))
+    if metric == "l2":
+        return max(0.0, min(1.0, 1.0 - distance / 2.0))
+    if metric == "ip":
+        return max(0.0, min(1.0, 1.0 - distance))
+    raise ValueError(f"不支持的向量距离类型: {metric}")
 
 
 def estimate_topk_for_query(query: str) -> int:
@@ -572,6 +653,103 @@ class RagService(object):
             f"（体感 {feels_like}℃），{wind_dir}{wind_scale}"
         )
 
+    def _knowledge_base_search(self, query: str) -> str:
+        """知识库检索，支持动态 k 值和相似度过滤。
+
+        优化点（R-005）:
+        1. 根据查询类型动态调整 k 值（2-5）
+        2. 使用 similarity_search_with_score 获取相似度分数
+        3. 过滤低于阈值的结果
+        4. 返回明确的"证据不足"状态
+
+        参数:
+            query: 用户的自然语言查询，如"羊毛衫怎么洗"、"面试穿搭注意事项"
+
+        返回值:
+            知识库文档内容，或明确的"证据不足"提示
+        """
+        try:
+            # Step 1: 根据查询类型动态估算 Top-K（如果启用）
+            if config.enable_knowledge_dynamic_k:
+                k = estimate_knowledge_k(query)
+                print(f"[INFO] 知识库检索使用动态 k={k}（查询类型推断）", flush=True)
+            else:
+                k = int(config.knowledge_retrieval_k)
+                print(f"[INFO] 知识库检索使用固定 k={k}（配置值）", flush=True)
+
+            # Step 2: 检索并获取相似度分数
+            start_time = time.time()
+            docs_with_scores = self.vector_service.vector_store.similarity_search_with_score(
+                query, k=k
+            )
+            search_time = time.time() - start_time
+            print(f"[PERF] 知识库检索耗时 {search_time:.3f}s，原始返回 {len(docs_with_scores)} 条", flush=True)
+
+            result = self._classify_knowledge_results(k, docs_with_scores)
+            if result.status == "no_evidence":
+                return "知识库中没有相关内容，建议：基于通用穿搭常识回答，并告知用户此回答不基于知识库。"
+
+            if result.status == "limited":
+                doc_content = result.documents[0][0].page_content
+                return (
+                    f"知识库证据有限（有效来源 {len(result.documents)} 个，相似度 {result.top_similarity:.2f}）：\n\n"
+                    f"{doc_content}\n\n"
+                    "[注意：证据不足，回答时需谨慎，可补充通用常识]"
+                )
+
+            result_texts = [doc.page_content for doc, _ in result.documents]
+            return "\n\n---\n\n".join(result_texts)
+
+        except Exception as exc:
+            print(f"[WARN] 知识库检索失败：{exc}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return "知识库检索暂时不可用，建议基于通用常识回答。"
+
+    def _classify_knowledge_results(self, k: int, docs_with_scores: list) -> KnowledgeRetrievalResult:
+        """按距离类型、阈值和知识来源判断证据强度。
+
+        业务规则：同一来源的多个 chunk 只算一个有效来源，避免长文档切块数量
+        误把单一来源包装成多份证据；过滤关闭时仍计算归一化分数，但不丢弃候选。
+        """
+        if not docs_with_scores:
+            return KnowledgeRetrievalResult("no_evidence", [], None, k)
+
+        vector_store = self.vector_service.vector_store
+        metric = get_vector_distance_metric(vector_store)
+        scored = []
+        for doc, distance in docs_with_scores:
+            similarity = normalize_vector_distance(distance, metric)
+            print(
+                f"[DEBUG] 文档相似度={similarity:.3f}（距离={float(distance):.3f}，类型={metric}）",
+                flush=True,
+            )
+            if not config.enable_knowledge_similarity_filter or similarity >= config.knowledge_min_similarity:
+                scored.append((doc, similarity))
+
+        if not scored:
+            return KnowledgeRetrievalResult("no_evidence", [], None, k)
+
+        # 同一 source 的多个 chunk 只保留最高分，减少重复上下文。
+        by_source = {}
+        for doc, similarity in scored:
+            source = str((getattr(doc, "metadata", None) or {}).get("source") or doc.page_content)
+            current = by_source.get(source)
+            if current is None or similarity > current[1]:
+                by_source[source] = (doc, similarity)
+        unique_docs = sorted(by_source.values(), key=lambda item: item[1], reverse=True)
+        top_similarity = unique_docs[0][1]
+        strong_threshold = float(config.knowledge_strong_similarity)
+        # 业务规则：单一来源只要达到强匹配阈值即可作为充分证据；来源数量用于
+        # 补充交叉验证，而不是把同一主题的权威文档强制判为证据有限。
+        status = "sufficient" if top_similarity >= strong_threshold else "limited"
+        print(
+            f"[INFO] 相似度过滤后保留 {len(unique_docs)}/{len(docs_with_scores)} 个来源（阈值≥{config.knowledge_min_similarity}）",
+            flush=True,
+        )
+        return KnowledgeRetrievalResult(status, unique_docs, top_similarity, k)
+
+
     def _estimate_topk(self, query: str) -> int:
         """根据query复杂度估算需要检索的Top-K数量。
 
@@ -812,16 +990,28 @@ class RagService(object):
     def __get_chain(self):
         """获取 LangGraph ReAct Agent，并打印组装工具链耗时。"""
         start_time = time.time()
-        retriever = self.vector_service.get_retriever()
         create_react_agent = self._get_langgraph_factory()
 
-        # 1. 知识库工具（始终注册）
-        retriever_tool = create_retriever_tool(
-            retriever,
-            "knowledge_base_search",
-            "当用户询问关于服装洗涤、尺码推荐、颜色搭配等通用穿搭知识时，必须使用此工具。",
+        # 1. 知识库工具（始终注册，使用自定义方法替代 retriever）
+        knowledge_tool = Tool(
+            name="knowledge_base_search",
+            description="""用于检索穿搭知识库内容。适用场景：
+- 服装洗涤保养（如"羊毛衫怎么洗"、"皮鞋如何保养"）
+- 尺码选择建议（如"尺码偏小怎么选"、"不同品牌尺码差异"）
+- 颜色搭配原则（如"黑色和米色怎么搭配"、"冷暖色调原则"）
+- 场景穿搭禁忌（如"面试穿搭注意事项"、"约会穿搭建议"）
+
+不适用场景：
+- 用户衣橱单品查询（使用 wardrobe_search）
+- 天气查询（使用 weather_search）
+- 通用聊天（直接回答）
+
+如果知识库无相关内容，会明确告知，此时应基于通用穿搭常识回答。
+输入参数：自然语言查询
+返回：相关知识库文档内容，或"证据不足"提示""",
+            func=self._knowledge_base_search,
         )
-        tools = [retriever_tool]
+        tools = [knowledge_tool]
 
         # 2. 天气工具（仅在服务可用时注册）
         if self.weather_service.available:

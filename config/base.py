@@ -34,7 +34,14 @@ separators = ["\n\n", "\n", " ", ""]
 # 超过该字符数才进行切分（避免短文本不必要的切分）
 max_split_char_number = 1000
 
-similarity_threshold = 2  # 检索返回匹配的文档数量
+# 知识库检索配置
+knowledge_retrieval_k = 3  # 知识库默认返回数量（可动态调整，范围 2-6）
+knowledge_min_similarity = 0.50  # 最低相似度阈值（基于当前真实知识库评测集标定）
+knowledge_strong_similarity = 0.60  # 达到该分数且有多个来源时视为证据充分
+
+# 功能开关
+enable_knowledge_dynamic_k = True  # 是否启用动态 k 值（根据查询类型调整）
+enable_knowledge_similarity_filter = True  # 是否启用相似度过滤
 
 embedding_model_name = EMBEDDING_MODEL_NAME
 chat_model_name = "qwen3-max"

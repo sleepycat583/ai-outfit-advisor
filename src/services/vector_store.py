@@ -73,9 +73,17 @@ class VectorStoreService(object):
         except Exception as exc:
             print(f"[WARN] 知识库自动恢复失败，将继续使用空索引: {exc}", flush=True)
 
-    def get_retriever(self):
-        """返回向量库检索器，方便加入 Chain"""
-        return self.vector_store.as_retriever(search_kwargs={"k": int(config.similarity_threshold)})
+    def get_retriever(self, k: int = None):
+        """返回向量库检索器，支持动态 k 值。
+
+        注意：此方法返回的 retriever 不支持相似度过滤。
+        如需过滤，应在调用侧使用 similarity_search_with_score 手动过滤。
+
+        参数:
+            k: 返回数量，默认使用配置值 knowledge_retrieval_k
+        """
+        k = k or int(config.knowledge_retrieval_k)
+        return self.vector_store.as_retriever(search_kwargs={"k": k})
 
 
 class VectorWardrobeService:

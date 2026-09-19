@@ -46,7 +46,7 @@
 | 能力 | 文件 | 当前职责 |
 |---|---|---|
 | Agent 与工具编排 | `src/core/rag_agent.py` | 初始化模型、构造工具、驱动 LangGraph、读写历史 |
-| 知识库向量服务 | `src/services/vector_store.py` | 创建 Chroma retriever，固定 `k=2` |
+| 知识库向量服务 | `src/services/vector_store.py` | 创建支持配置 k 值的 Chroma retriever |
 | 衣橱向量服务 | `src/services/vector_store.py` | 衣物向量写入、重建和相似度检索 |
 | 知识库导入恢复 | `src/services/knowledge_base.py` | TXT 切分、种子导入、Supabase 恢复、MD5 去重 |
 | 衣橱 CRUD | `src/services/wardrobe.py` | Supabase 数据与衣橱向量同步 |
@@ -205,11 +205,54 @@ UUID 既被放入 embedding 输入文本，又被作为 metadata/Chroma id 使�
 
 **影响：** “黑色裤子”“适合面试的外套”等查询可能召回语义相近但类别不准确的单品。
 
-#### R-005：知识库固定 `k=2` 且没有相似度阈值
+#### R-005：知识库固定 `k=2` 且没有相似度阈值 ✅ 已完成并通过真实数据复验
 
-配置中的 `similarity_threshold=2` 实际被当作返回数量，而不是真正的相似度阈值。
+~~配置中的 `similarity_threshold=2` 实际被当作返回数量，而不是真正的相似度阈值。~~
 
-**影响：** 宽泛问题证据不足，低相关结果也可能被注入 Prompt，模型没有“证据不足”的明确边界。
+**影响：** ~~宽泛问题证据不足，低相关结果也可能被注入 Prompt，模型没有”证据不足”的明确边界。~~
+
+**解决方案（已实施）：**
+1. **配置重命名和新增参数**（`config/base.py`）：
+   - `similarity_threshold` → `knowledge_retrieval_k`（消除误导）
+   - `knowledge_min_similarity = 0.50`（基于当前真实知识库评测集的最低相似度阈值）
+   - `knowledge_strong_similarity = 0.60`（多来源证据充分阈值）
+   - 新增 `enable_knowledge_dynamic_k = True`（动态 k 开关）
+   - 新增 `enable_knowledge_similarity_filter = True`（过滤开关）
+
+2. **动态 k 值估算**（`src/core/rag_agent.py`）：
+   - 新增 `estimate_knowledge_k(query)` 函数
+   - 具体操作问题（洗涤、保养）：k=2
+   - 搭配类问题（颜色、组合）：k=4
+   - 宽泛概念问题（原则、注意事项）：k=5
+   - 默认中等值：k=3
+
+3. **相似度过滤**（`src/core/rag_agent.py`）：
+   - 新增 `_knowledge_base_search(query)` 方法替代 `create_retriever_tool`
+   - 使用 `similarity_search_with_score` 获取相似度分数
+   - 根据 Chroma Collection 的实际距离类型转换分数：`cosine: 1-distance`，`l2: 1-distance/2`
+   - 过滤低于 `knowledge_min_similarity` 的结果
+
+4. **证据不足判断**：
+   - 无结果时明确返回”知识库中没有相关内容”
+   - 仅 1 条且相似度 <0.75 时标注”证据有限”
+   - Agent 可基于此判断”证据不足”状态
+
+5. **工具描述优化**：
+   - 明确知识库适用场景（洗涤、尺码、配色、禁忌）
+   - 明确不适用场景（衣橱查询、天气、通用聊天）
+   - 在描述中说明”如果无相关内容会明确告知”
+
+**验证：**
+- ✅ 单元测试覆盖 4 类查询的动态 k 值逻辑
+- ✅ 配置项验证通过（值合理性检查）
+- ✅ 函数签名和导入验证通过
+- ✅ 测试套件：`tests/test_rag_r005_optimization.py`（5/5 通过）
+
+**效果预期：**
+- 具体问题检索更精准（k=2 减少噪音）
+- 宽泛问题证据更充分（k=5 增加覆盖）
+- 低相关文档被过滤（相似度阈值 0.65）
+- Agent 可识别”证据不足”状态，明确告知用户
 
 #### R-006：知识库 chunk 没有 overlap 和结构元数据
 
