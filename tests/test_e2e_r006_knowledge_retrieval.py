@@ -56,7 +56,7 @@ class TestKnowledgeRetrievalWithMetadata:
 
         assert "来源: [种子] 洗涤养护指南.txt" in result
         assert "章节: 羊毛制品洗涤" in result
-        assert "片段: 3/6" in result  # chunk_index+1, total_chunks+1
+        assert "片段: 3/5" in result  # chunk_index 从 0 开始，total_chunks 是总数
         assert "羊毛衫需要手洗" in result
 
     def test_format_knowledge_chunk_without_section(self, mock_documents):
@@ -75,7 +75,7 @@ class TestKnowledgeRetrievalWithMetadata:
 
         assert "来源: 测试文档.txt" in result
         assert "章节:" not in result  # 没有章节时不显示
-        assert "片段: 1/2" in result
+        assert "片段: 1/1" in result
         assert "测试内容" in result
 
     def test_format_knowledge_chunk_legacy_metadata(self):
@@ -128,11 +128,11 @@ class TestKnowledgeRetrievalWithMetadata:
             # 验证结果包含两个 chunk 的格式化输出
             assert "来源: [种子] 洗涤养护指南.txt" in result
             assert "章节: 羊毛制品洗涤" in result
-            assert "片段: 3/6" in result
+            assert "片段: 3/5" in result
 
             assert "来源: [种子] 面试穿搭指南.txt" in result
             assert "章节: 穿搭禁忌" in result
-            assert "片段: 1/4" in result
+            assert "片段: 1/3" in result
 
             # 验证分隔符
             assert "\n\n---\n\n" in result
@@ -151,5 +151,5 @@ class TestKnowledgeRetrievalWithMetadata:
 
         result = agent._format_knowledge_chunk(doc, 0.90)
 
-        # 显示应该是 1/3（用户友好的 1-based）
-        assert "片段: 1/3" in result
+        # 显示应该是 1/2（索引从 0 开始，总数直接使用 metadata）
+        assert "片段: 1/2" in result

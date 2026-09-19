@@ -735,7 +735,7 @@ class RagService(object):
             header_parts.append(f"章节: {section}")
 
         if chunk_index is not None and total_chunks is not None:
-            header_parts.append(f"片段: {chunk_index + 1}/{total_chunks + 1}")
+            header_parts.append(f"片段: {chunk_index + 1}/{total_chunks}")
 
         header = " | ".join(header_parts)
 
