@@ -26,6 +26,59 @@ from src.services.weather import WeatherService
 from config.supabase import get_supabase_client
 
 
+def estimate_topk_for_query(query: str) -> int:
+    """根据query复杂度估算需要检索的Top-K数量（独立函数，供测试和生产使用）。
+
+    规则:
+    - 简单查询(0-1维度 且 ≤5字): k=5
+      示例: "外套", "裤子", "黑色", "黑色裤子"
+    - 中等查询(2维度 且 6-10字): k=8
+      示例: "黑色外套", "春季上衣", "休闲裤子"
+    - 复杂查询(3+维度或场景或≥11字): k=12
+      示例: "黑色春季外套", "适合面试的正式穿搭"
+
+    参数:
+        query: 用户查询文本
+
+    返回:
+        建议的Top-K数量(5/8/12)
+    """
+    # 场景类查询直接返回k=12(通常需要多件单品组合)
+    scene_keywords = ["适合", "面试", "约会", "聚会", "通勤", "出游", "旅行", "派对", "穿搭", "搭配"]
+    if any(kw in query for kw in scene_keywords):
+        return 12
+
+    # 统计query中的关键维度词
+    complexity_markers = [
+        ("季节", ["春", "夏", "秋", "冬", "早春", "初秋", "盛夏", "寒冬"]),
+        ("颜色", ["黑", "白", "蓝", "红", "灰", "米", "卡其", "藏青", "深蓝", "浅蓝", "棕", "绿"]),
+        ("风格", ["休闲", "正式", "运动", "甜美", "帅气", "简约", "复古", "街头", "优雅"]),
+        ("类别", ["外套", "裤子", "裙子", "鞋", "上衣", "内搭", "大衣", "夹克", "衬衫", "T恤"]),
+    ]
+
+    dimension_count = sum(
+        1 for _, keywords in complexity_markers
+        if any(kw in query for kw in keywords)
+    )
+
+    # 基于字数和维度的k值策略
+    # 规则: 字数优先级高于维度数,避免"黑色裤子"(4字2维度)被误判为k=8
+    query_len = len(query)
+
+    if query_len <= 5:
+        # ≤5字无论几个维度都是简单查询
+        return 5
+    elif dimension_count >= 3 or query_len >= 11:
+        # 3+维度或≥11字是复杂查询
+        return 12
+    elif dimension_count == 2:
+        # 6-10字且2维度是中等查询
+        return 8
+    else:
+        # 其他情况默认简单查询
+        return 5
+
+
 class OOTDItem(BaseModel):
     desc: str = Field(description="【自有】或【建议购入】+ **单品名称** + 搭配理由")
     id: str = Field(default="", description="衣橱中该单品的精确id，建议购入时留空字符串")
@@ -496,54 +549,9 @@ class RagService(object):
     def _estimate_topk(self, query: str) -> int:
         """根据query复杂度估算需要检索的Top-K数量。
 
-        规则:
-        - 简单查询(0-1维度 且 ≤5字): k=5
-          示例: "外套", "裤子", "黑色", "黑色裤子"
-        - 中等查询(2维度): k=8
-          示例: "黑色外套", "春季上衣", "休闲裤子"
-        - 复杂查询(3+维度或场景): k=12
-          示例: "黑色春季外套", "适合面试的正式穿搭"
-
-        参数:
-            query: 用户查询文本
-
-        返回:
-            建议的Top-K数量(5/8/12)
+        直接调用独立函数 estimate_topk_for_query()。
         """
-        # 场景类查询直接返回k=12(通常需要多件单品组合)
-        scene_keywords = ["适合", "面试", "约会", "聚会", "通勤", "出游", "旅行", "派对", "穿搭", "搭配"]
-        if any(kw in query for kw in scene_keywords):
-            return 12
-
-        # 统计query中的关键维度词
-        complexity_markers = [
-            ("季节", ["春", "夏", "秋", "冬", "早春", "初秋", "盛夏", "寒冬"]),
-            ("颜色", ["黑", "白", "蓝", "红", "灰", "米", "卡其", "藏青", "深蓝", "浅蓝", "棕", "绿"]),
-            ("风格", ["休闲", "正式", "运动", "甜美", "帅气", "简约", "复古", "街头", "优雅"]),
-            ("类别", ["外套", "裤子", "裙子", "鞋", "上衣", "内搭", "大衣", "夹克", "衬衫", "T恤"]),
-        ]
-
-        dimension_count = sum(
-            1 for _, keywords in complexity_markers
-            if any(kw in query for kw in keywords)
-        )
-
-        # 基于字数和维度的k值策略
-        # 规则: 字数优先级高于维度数,避免"黑色裤子"(4字2维度)被误判为k=8
-        query_len = len(query)
-
-        if query_len <= 5:
-            # ≤5字无论几个维度都是简单查询
-            return 5
-        elif dimension_count >= 3 or query_len >= 11:
-            # 3+维度或≥11字是复杂查询
-            return 12
-        elif dimension_count == 2:
-            # 6-10字且2维度是中等查询
-            return 8
-        else:
-            # 其他情况默认简单查询
-            return 5
+        return estimate_topk_for_query(query)
 
     def _compress_wardrobe_results(self, query: str, items: list[str]) -> str:
         """简单高效的压缩策略:直接截断到Top-6,避免LLM压缩导致的格式破坏和死循环风险。

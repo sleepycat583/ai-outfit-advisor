@@ -349,7 +349,20 @@ class WardrobeService:
             return 0
 
         if mode == "replace":
-            # 删除当前用户所有记录
+            # 1. 先查询旧单品 ID（用于清理 Chroma 向量）
+            old_result = self.supabase.table("wardrobe_items").select("id").eq("user_id", self.user_id).execute()
+            old_ids = [r["id"] for r in (old_result.data or [])]
+
+            # 2. 删除旧向量（确保 Supabase 和 Chroma 数据一致）
+            if self.vector_wardrobe and old_ids:
+                try:
+                    self.vector_wardrobe.delete_items(old_ids)
+                    print(f"[INFO] replace 模式已清理 {len(old_ids)} 个旧向量", flush=True)
+                except Exception as e:
+                    print(f"[ERROR] 向量删除失败: {e}", flush=True)
+                    raise ValueError("replace 模式向量清理失败，已中止操作")
+
+            # 3. 删除当前用户所有记录
             self.supabase.table("wardrobe_items").delete().eq("user_id", self.user_id).execute()
             # 批量插入
             rows = [
@@ -399,6 +412,11 @@ class WardrobeService:
 
         if self.vector_wardrobe and count > 0:
             sync_items = [(item["id"], _item_to_text(item)) for item in new_items]
-            self.vector_wardrobe.update_items(sync_items)
+            # replace 模式已在前面清空旧向量，这里直接添加新向量
+            # append 模式使用 update_items 以处理重复 ID
+            if mode == "replace":
+                self.vector_wardrobe.add_items(sync_items)
+            else:
+                self.vector_wardrobe.update_items(sync_items)
 
         return count
