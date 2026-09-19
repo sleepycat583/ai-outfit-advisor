@@ -690,21 +690,56 @@ class RagService(object):
                 return "知识库中没有相关内容，建议：基于通用穿搭常识回答，并告知用户此回答不基于知识库。"
 
             if result.status == "limited":
-                doc_content = result.documents[0][0].page_content
+                doc, similarity = result.documents[0]
+                formatted = self._format_knowledge_chunk(doc, similarity)
                 return (
                     f"知识库证据有限（有效来源 {len(result.documents)} 个，相似度 {result.top_similarity:.2f}）：\n\n"
-                    f"{doc_content}\n\n"
+                    f"{formatted}\n\n"
                     "[注意：证据不足，回答时需谨慎，可补充通用常识]"
                 )
 
-            result_texts = [doc.page_content for doc, _ in result.documents]
-            return "\n\n---\n\n".join(result_texts)
+            formatted_docs = [self._format_knowledge_chunk(doc, sim) for doc, sim in result.documents]
+            return "\n\n---\n\n".join(formatted_docs)
 
         except Exception as exc:
             print(f"[WARN] 知识库检索失败：{exc}", flush=True)
             import traceback
             traceback.print_exc()
             return "知识库检索暂时不可用，建议基于通用常识回答。"
+
+    def _format_knowledge_chunk(self, doc, similarity: float) -> str:
+        """格式化单个知识 chunk，附带章节和位置信息。
+
+        参数:
+            doc: LangChain Document 对象
+            similarity: 归一化后的相似度分数 (0-1)
+
+        返回:
+            格式化后的文本，包含来源、章节、内容
+        """
+        metadata = getattr(doc, "metadata", {}) or {}
+        content = doc.page_content
+
+        # 基础信息
+        source = metadata.get("source", "未知来源")
+
+        # 新增元数据（R-006）
+        section = metadata.get("section_title", "")
+        chunk_index = metadata.get("chunk_index")
+        total_chunks = metadata.get("total_chunks")
+
+        # 构建头部信息
+        header_parts = [f"来源: {source}"]
+
+        if section:
+            header_parts.append(f"章节: {section}")
+
+        if chunk_index is not None and total_chunks is not None:
+            header_parts.append(f"片段: {chunk_index + 1}/{total_chunks + 1}")
+
+        header = " | ".join(header_parts)
+
+        return f"{header}\n{content}"
 
     def _classify_knowledge_results(self, k: int, docs_with_scores: list) -> KnowledgeRetrievalResult:
         """按距离类型、阈值和知识来源判断证据强度。
