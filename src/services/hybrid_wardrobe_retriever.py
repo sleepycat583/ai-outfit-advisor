@@ -107,12 +107,13 @@ class HybridWardrobeRetriever:
             # 拼接多个颜色条件
             query_builder = query_builder.or_(",".join(color_conditions))
 
-        # 季节过滤（数组字段，使用 @> 包含操作符）
-        # 注意：Supabase Python SDK 的 contains() 方法用于数组包含
+        # 业务规则：season 当前是逗号分隔的 text（如“春,夏,秋”），
+        # 不能使用 overlaps() 的 PostgreSQL 数组操作符。
         if parsed.seasons:
-            # 匹配任一季节：season && ARRAY['春', '夏']
-            # Supabase SDK: overlaps() 方法
-            query_builder = query_builder.overlaps("season", parsed.seasons)
+            season_conditions = [
+                f"season.ilike.%{season}%" for season in parsed.seasons
+            ]
+            query_builder = query_builder.or_(",".join(season_conditions))
 
         try:
             result = query_builder.execute()

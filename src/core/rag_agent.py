@@ -353,6 +353,9 @@ class RagService(object):
             yield {"type": "status", "label": "✨ 灵感迸发，正在为你整理专属穿搭方案..."}
 
             answer = self._extract_answer_from_state(last_state)
+            answer = self._attach_weather_notice(
+                answer, self.weather_service.get_last_status()
+            )
             try:
                 history = FileChatMessageHistory(session_id=session_id)
                 history.add_messages(
@@ -612,6 +615,9 @@ class RagService(object):
 
         state = self.chain.invoke(graph_inputs, config=normalized_config)
         answer = self._extract_answer_from_state(state)
+        answer = self._attach_weather_notice(
+            answer, self.weather_service.get_last_status()
+        )
 
         try:
             history = FileChatMessageHistory(session_id=session_id)
@@ -635,10 +641,16 @@ class RagService(object):
             天气描述文本，供 LLM 阅读
         """
         result = self.weather_service.get_current_weather(query)
+        weather_status = self.weather_service.get_last_status()
 
-        # 降级返回了兜底文案字符串，直接返回
         if isinstance(result, str):
-            return result
+            return (
+                f"【天气数据状态：{weather_status['status']}】\n"
+                f"【数据来源：{weather_status['source']}】\n"
+                f"【重要：{weather_status['message']}】\n"
+                f"{result}\n"
+                "如果状态不是 success，不得把季节常识描述成实时温度、天气现象、风力或降水。"
+            )
 
         # 否则拼接成可读文本
         city = result.get("city", query)
@@ -649,9 +661,32 @@ class RagService(object):
         wind_scale = result.get("wind_scale", "")
 
         return (
+            f"【天气数据状态：{weather_status['status']}】\n"
+            f"【数据来源：{weather_status['source']}】\n"
             f"{city} 当前天气：{text}，气温 {temp}℃"
             f"（体感 {feels_like}℃），{wind_dir}{wind_scale}"
         )
+
+    @staticmethod
+    def _attach_weather_notice(answer: str, weather_status: dict) -> str:
+        """把天气可信度写入最终答案，确保历史记录保留数据来源。
+
+        只有本轮实际调用过天气服务时才添加提示，普通穿搭问题不会出现无关天气标识。
+        """
+        status = weather_status.get("status")
+        source = weather_status.get("source", "")
+        if status == "success":
+            if source == "qweather_cache":
+                notice = "ℹ️ 天气说明：本次使用已缓存的天气数据，未直接请求实时接口。"
+            else:
+                notice = "🌤️ 天气说明：本次已使用和风天气实时数据。"
+        elif status == "stale":
+            notice = "ℹ️ 天气说明：天气接口不可用，本次使用了过期缓存，数据可能不是最新。"
+        elif status == "degraded":
+            notice = "⚠️ 天气说明：天气接口调用失败，本次未使用实时天气数据。"
+        else:
+            return answer
+        return f"{notice}\n\n{answer}"
 
     def _knowledge_base_search(self, query: str) -> str:
         """知识库检索，支持动态 k 值和相似度过滤。
@@ -930,12 +965,13 @@ class RagService(object):
         style = user_profile.get("style", "未设置")
         body = user_profile.get("body", "") or "未设置"
         city = user_profile.get("city", "未设置") or "未设置"
+        location_id = user_profile.get("location_id") or None
 
         # Step 1: 一次性获取未来一周天气
         if status_container:
             status_container.update(label="🌤️ 正在为您观测未来一周天象...")
 
-        forecast_result = self.weather_service.get_forecast_7d(city)
+        forecast_result = self.weather_service.get_forecast_7d(city, location_id=location_id)
 
         # 判断返回类型：降级文案 str 或正常数据 list
         if isinstance(forecast_result, str):

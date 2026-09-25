@@ -6,6 +6,7 @@
 import streamlit as st
 import time
 from src.services.user import UserService
+from src.services.weather import WeatherService
 from src.ui.pages import qa_page, knowledge_base_page
 
 
@@ -22,6 +23,12 @@ def get_cached_profile(user_id: str) -> dict:
 def clear_profile_cache() -> None:
     """清理用户档案缓存，避免资料更新后页面继续显示旧数据。"""
     get_cached_profile.clear()
+
+
+@st.cache_resource(show_spinner=False)
+def get_weather_location_service() -> WeatherService:
+    """创建复用的地点解析服务，避免每次 Streamlit rerun 都重建客户端。"""
+    return WeatherService()
 
 
 def perf_log(label: str, start_time: float) -> None:
@@ -137,6 +144,9 @@ if "user_gender" not in st.session_state:
     st.session_state["user_style"] = saved_profile.get("style", "日常休闲")
     st.session_state["user_body"] = saved_profile.get("body", "")
     st.session_state["user_city"] = saved_profile.get("city", "")
+    st.session_state["user_location_id"] = saved_profile.get("location_id", "")
+    st.session_state["user_location_label"] = saved_profile.get("location_label", "")
+    st.session_state["user_location_city"] = saved_profile.get("city", "")
     st.session_state["_last_saved_profile"] = saved_profile.copy()
     perf_log("app_main initial profile load", profile_start)
 
@@ -192,12 +202,55 @@ with st.sidebar:
         placeholder="例如：上海、广州、成都",
     )
 
+    weather_location_service = get_weather_location_service()
+    confirmed_city = st.session_state.get("user_location_city", "")
+    if user_city.strip() != confirmed_city:
+        st.session_state["user_location_id"] = ""
+        st.session_state["user_location_label"] = ""
+
+    if st.button("🔎 搜索并确认城市", use_container_width=True):
+        candidates = weather_location_service.search_locations(user_city)
+        if not candidates:
+            st.warning("没有找到这个地点，请补充城市或区县名称。")
+            st.session_state["location_candidates"] = []
+        elif len(candidates) == 1:
+            selected = candidates[0]
+            st.session_state["user_location_id"] = selected["id"]
+            st.session_state["user_location_city"] = user_city.strip()
+            st.session_state["user_location_label"] = " / ".join(
+                part for part in (selected["name"], selected["adm2"], selected["adm1"]) if part
+            )
+            st.session_state["location_candidates"] = []
+            st.success(f"已确认地点：{st.session_state['user_location_label']}")
+        else:
+            st.session_state["location_candidates"] = candidates
+
+    location_candidates = st.session_state.get("location_candidates", [])
+    if location_candidates:
+        labels = [
+            " / ".join(part for part in (item["name"], item["adm2"], item["adm1"]) if part)
+            for item in location_candidates
+        ]
+        selected_index = st.selectbox("请选择准确地点", range(len(labels)), format_func=lambda i: labels[i])
+        if st.button("✅ 使用这个地点", use_container_width=True):
+            selected = location_candidates[selected_index]
+            st.session_state["user_location_id"] = selected["id"]
+            st.session_state["user_location_city"] = user_city.strip()
+            st.session_state["user_location_label"] = labels[selected_index]
+            st.session_state["location_candidates"] = []
+            st.rerun()
+
+    if st.session_state.get("user_location_label"):
+        st.caption(f"已确认：{st.session_state['user_location_label']}")
+
     # 自动保存档案变更
     current_profile = {
         "gender": st.session_state["user_gender"],
         "style": st.session_state["user_style"],
         "body": st.session_state["user_body"],
         "city": st.session_state["user_city"],
+        "location_id": st.session_state.get("user_location_id", ""),
+        "location_label": st.session_state.get("user_location_label", ""),
     }
     if st.session_state.get("_last_saved_profile") != current_profile:
         user_service.save_profile(user_id, current_profile)

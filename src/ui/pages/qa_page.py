@@ -219,6 +219,23 @@ def render_page():
             render_recommendations(item_ids, w_items)
 
 
+    def render_weather_status(weather_status):
+        """显示天气数据可信度，避免降级文案被用户误认为实时天气。"""
+        if not weather_status:
+            return
+        status = weather_status.get("status")
+        message = weather_status.get("message", "")
+        if status == "degraded":
+            st.warning(f"⚠️ 当前天气数据获取失败。本次建议未使用实时天气数据。{message}")
+        elif status == "stale":
+            st.info(f"ℹ️ 和风天气暂时不可用，当前使用缓存数据，可能不是最新数据。{message}")
+        elif status == "success":
+            if weather_status.get("source") == "qweather_cache":
+                st.info("ℹ️ 本次建议使用了已缓存的天气数据，未直接请求实时接口。")
+            else:
+                st.success("🌤️ 本次建议已使用和风天气实时数据。")
+
+
     class HumanizedStatusHandler(BaseCallbackHandler):
         """拟人化状态回调：将 Agent 内部步骤翻译为有趣的用户提示语。"""
 
@@ -547,6 +564,7 @@ def render_page():
                         "style": st.session_state.get("user_style", "日常休闲"),
                         "body": st.session_state.get("user_body", ""),
                         "city": st.session_state.get("user_city", ""),
+                        "location_id": st.session_state.get("user_location_id", ""),
                     }
                     plan = st.session_state["rag"].generate_weekly_plan(
                         user_profile=user_profile,
@@ -608,6 +626,7 @@ def render_page():
         for message in st.session_state["message"]:
             if message["role"] == "assistant":
                 with st.chat_message(message["role"]):
+                    render_weather_status(message.get("weather_status"))
                     render_message(message["content"], wardrobe_items)
             else:
                 st.chat_message(message["role"]).write(message["content"])
@@ -647,6 +666,8 @@ def render_page():
                 with st.status("小衣正在为您精心搭配...", expanded=True) as status:
                     try:
                         res = FALLBACK_MESSAGE
+                        weather_status = {"status": "not_called", "source": "none", "message": "本轮未调用天气服务"}
+                        st.session_state["rag"].weather_service.reset_status()
                         qa_start = time.time()
                         for event in st.session_state["rag"].stream_events(
                             {
@@ -655,6 +676,7 @@ def render_page():
                                 "style": st.session_state.get("user_style", "日常休闲"),
                                 "body": st.session_state.get("user_body", ""),
                                 "city": st.session_state.get("user_city", ""),
+                                "location_id": st.session_state.get("user_location_id", ""),
                                 "current_date": datetime.datetime.now().strftime("%Y年%m月%d日"),
                             },
                             config={
@@ -675,6 +697,9 @@ def render_page():
                                 res = event.get("content", FALLBACK_MESSAGE)
                                 status.update(label="⚠️ 小衣思考超时，请稍后再试", state="error", expanded=False)
                         perf_log("app_qa qa stream_events", qa_start)
+                        weather_status = st.session_state["rag"].weather_service.get_last_status()
+                        if weather_status.get("status") in {"success", "degraded", "stale"}:
+                            render_weather_status(weather_status)
                     except Exception:
                         res = FALLBACK_MESSAGE
                         status.update(label="⚠️ 小衣思考超时，请稍后再试", state="error", expanded=False)
@@ -684,7 +709,10 @@ def render_page():
                 placeholder.write_stream(typewriter_stream([clean_res]))
                 placeholder.empty()
                 render_message(res, wardrobe_items)
-            st.session_state["message"].append({"role": "assistant", "content": res})
+            assistant_message = {"role": "assistant", "content": res}
+            if weather_status.get("status") in {"success", "degraded", "stale"}:
+                assistant_message["weather_status"] = weather_status
+            st.session_state["message"].append(assistant_message)
         perf_log("app_qa render_page input and status", input_status_start)
 
     with tab_wardrobe:
