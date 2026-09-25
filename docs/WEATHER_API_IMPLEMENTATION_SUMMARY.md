@@ -125,8 +125,8 @@ weather_info = "\n".join(weather_lines)
 **.env.example**（新增）：
 ```env
 # 和风天气 API 配置
-QWEATHER_API_KEY=your_api_key_here
-QWEATHER_API_HOST=api.qweather.com
+QWEATHER_API_KEY=your_qweather_api_key_here
+QWEATHER_API_HOST=your-project-id.region.qweatherapi.com
 ```
 
 **requirements.txt**（新增依赖）：
@@ -169,14 +169,14 @@ SELECT * FROM weather_cache LIMIT 1;
 
 **本地开发**（`.env` 文件）：
 ```env
-QWEATHER_API_KEY=dcc78739c0ae49c0a0a0f33be7534c2b
-QWEATHER_API_HOST=api.qweather.com
+QWEATHER_API_KEY = "your_qweather_api_key_here"
+QWEATHER_API_HOST = "your-project-id.region.qweatherapi.com"
 ```
 
 **Streamlit Cloud**（Secrets 配置）：
 ```toml
-QWEATHER_API_KEY = "dcc78739c0ae49c0a0a0f33be7534c2b"
-QWEATHER_API_HOST = "api.qweather.com"
+QWEATHER_API_KEY = "your_qweather_api_key_here"
+QWEATHER_API_HOST = "your-project-id.region.qweatherapi.com"
 ```
 
 ### 任务 3：本地测试验证（推荐）
